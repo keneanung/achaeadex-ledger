@@ -7,7 +7,8 @@ local config = _G.AchaeadexLedger.Mudlet.Config or {}
 
 local loaded = false
 local values = {
-  color = "on"
+  color = "on",
+  time_cost_per_hour = 0
 }
 
 local function get_base_dir()
@@ -66,6 +67,9 @@ local function load_config()
     if data.color == "on" or data.color == "off" then
       values.color = data.color
     end
+    if type(data.time_cost_per_hour) == "number" and data.time_cost_per_hour >= 0 then
+      values.time_cost_per_hour = math.floor(data.time_cost_per_hour)
+    end
   end
 end
 
@@ -102,6 +106,11 @@ end
 function config.is_color_enabled()
   load_config()
   return values.color ~= "off"
+end
+
+function config.get_time_cost_per_hour()
+  load_config()
+  return values.time_cost_per_hour or 0
 end
 
 _G.AchaeadexLedger.Mudlet.Config = config

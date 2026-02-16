@@ -110,7 +110,7 @@ local function parse_flags(tokens, start_index)
   return args, flags
 end
 
-local function warn_lines(report, state)
+local function warn_lines(report, state, time_cost_per_hour)
   local warnings = {}
 
   local events = state.event_store and state.event_store:read_all() or {}
@@ -121,7 +121,9 @@ local function warn_lines(report, state)
     end
   end
 
-  table.insert(warnings, "WARNING: Time cost = 0")
+  if (time_cost_per_hour or 0) == 0 then
+    table.insert(warnings, "WARNING: Time cost = 0")
+  end
 
   if report.design_remaining and report.design_remaining > 0 then
     table.insert(warnings, "WARNING: Design capital remaining > 0")
@@ -322,8 +324,8 @@ local help_topics = {
     purpose = "Record crafted items and resolve design later if needed.",
     commands = {
       {
-        usage = "adex craft [<item_id>] [<design_id>] <operational_cost> [--appearance <appearance_key>] [--design <design_id>]",
-        example = "adex craft D1 40 --appearance \"simple black shirt\""
+        usage = "adex craft [<item_id>] [<design_id>] <operational_cost> [--appearance <appearance_key>] [--design <design_id>] [--time <hours>]",
+        example = "adex craft D1 40 --appearance \"simple black shirt\" --time 0.5"
       },
       {
         usage = "adex craft resolve <item_id> <design_id>",
@@ -424,8 +426,16 @@ local help_topics = {
         example = "adex config set color off"
       },
       {
+        usage = "adex config set time-cost <gold_per_hour>",
+        example = "adex config set time-cost 25"
+      },
+      {
         usage = "adex config get color",
         example = "adex config get color"
+      },
+      {
+        usage = "adex config get time-cost",
+        example = "adex config get time-cost"
       }
     }
   }
@@ -545,8 +555,25 @@ function commands.handle(input)
     return
   end
 
+  if cmd == "config" and tokens[2] == "set" and tokens[3] == "time-cost" then
+    local value = tonumber(tokens[4])
+    if value == nil or value < 0 then
+      error_out("usage: adex config set time-cost <gold_per_hour>")
+      return
+    end
+    config.set("time_cost_per_hour", math.floor(value))
+    out("OK")
+    return
+  end
+
   if cmd == "config" and tokens[2] == "get" and tokens[3] == "color" then
     out("color: " .. tostring(config.get("color")))
+    return
+  end
+
+  if cmd == "config" and tokens[2] == "get" and tokens[3] == "time-cost" then
+    local value = config.get_time_cost_per_hour and config.get_time_cost_per_hour() or config.get("time_cost_per_hour") or 0
+    out("time_cost_per_hour: " .. tostring(value))
     return
   end
 
@@ -884,9 +911,17 @@ function commands.handle(input)
       item_id = nil
     end
     local appearance_key = flags.appearance
+    local time_hours = 0
+    if flags.time then
+      time_hours = tonumber(flags.time)
+      if time_hours == nil or time_hours < 0 then
+        error_out("usage: adex craft [<item_id>] [<design_id>] <operational_cost> [--appearance <appearance_key>] [--design <design_id>] [--time <hours>]")
+        return
+      end
+    end
 
     if operational_cost == nil then
-      error_out("usage: adex craft [<item_id>] [<design_id>] <operational_cost> [--appearance <appearance_key>] [--design <design_id>]")
+      error_out("usage: adex craft [<item_id>] [<design_id>] <operational_cost> [--appearance <appearance_key>] [--design <design_id>] [--time <hours>]")
       return
     end
 
@@ -899,10 +934,15 @@ function commands.handle(input)
 
     local design = design_id and state.designs[design_id] or nil
     local per_item_fee = design and (design.per_item_fee_gold or 0) or 0
-    local operational_cost_gold = operational_cost + per_item_fee
+    local time_cost_per_hour = config.get_time_cost_per_hour and config.get_time_cost_per_hour() or (tonumber(config.get("time_cost_per_hour")) or 0)
+    local time_cost = math.floor(time_hours * time_cost_per_hour)
+    local operational_cost_gold = operational_cost + per_item_fee + time_cost
     local breakdown = {
       base_cost = operational_cost,
-      per_item_fee = per_item_fee
+      per_item_fee = per_item_fee,
+      time_hours = time_hours,
+      time_cost_per_hour = time_cost_per_hour,
+      time_cost = time_cost
     }
 
     ledger.apply_craft_item(state, item_id, design_id, operational_cost_gold, json.encode(breakdown), appearance_key)
@@ -986,7 +1026,8 @@ function commands.handle(input)
       render.kv_block(remaining_rows)
     end
 
-    render_warnings(render, warn_lines(report, state))
+    local time_cost_per_hour = config.get_time_cost_per_hour and config.get_time_cost_per_hour() or 0
+    render_warnings(render, warn_lines(report, state, time_cost_per_hour))
     return
   end
 
@@ -1192,7 +1233,7 @@ function commands.handle(input)
       return
     end
 
-    local report = reports.overall(state)
+    local report = reports.overall(state, { time_cost_per_hour = config.get_time_cost_per_hour and config.get_time_cost_per_hour() or 0 })
     local fmt = render.format_gold or tostring
     render.section("Overall Report")
     render_totals(render, report.totals)
@@ -1235,7 +1276,7 @@ function commands.handle(input)
       return
     end
 
-    local report = reports.year(state, year)
+    local report = reports.year(state, year, { time_cost_per_hour = config.get_time_cost_per_hour and config.get_time_cost_per_hour() or 0 })
     render.section("Year Report: " .. tostring(year))
     render.section("Year Activity")
     render_totals(render, report.totals)
@@ -1258,7 +1299,7 @@ function commands.handle(input)
       return
     end
 
-    local report = reports.order(state, order_id)
+    local report = reports.order(state, order_id, { time_cost_per_hour = config.get_time_cost_per_hour and config.get_time_cost_per_hour() or 0 })
     local order = report.order
     local fmt = render.format_gold or tostring
 
@@ -1345,6 +1386,7 @@ function commands.handle(input)
       opts.year = year
     end
 
+    opts.time_cost_per_hour = config.get_time_cost_per_hour and config.get_time_cost_per_hour() or 0
     local report = reports.design(state, design_id, opts)
     local fmt = render.format_gold or tostring
 

@@ -97,12 +97,18 @@ local function unsold_items_value(state, design_id)
   return total, count
 end
 
-local function build_base_warnings(state)
+local function build_base_warnings(state, opts)
   local warnings = {}
   if has_opening_inventory(state) then
     table.insert(warnings, "WARNING: Opening inventory uses MtM")
   end
-  table.insert(warnings, "WARNING: Time cost = 0")
+  local time_cost_per_hour = 0
+  if opts and type(opts.time_cost_per_hour) == "number" then
+    time_cost_per_hour = opts.time_cost_per_hour
+  end
+  if time_cost_per_hour == 0 then
+    table.insert(warnings, "WARNING: Time cost = 0")
+  end
   return warnings
 end
 
@@ -193,14 +199,14 @@ local function outstanding_pattern_capital(state)
   return total
 end
 
-function reports.overall(state)
+function reports.overall(state, opts)
   local sales = collect_sales(state)
   local totals = sum_totals(sales)
 
   local design_remaining = outstanding_design_capital(state)
   local pattern_remaining = outstanding_pattern_capital(state)
 
-  local warnings = build_base_warnings(state)
+  local warnings = build_base_warnings(state, opts)
   local inventory_total, inventory_warning = inventory_value(state)
   if inventory_warning then
     table.insert(warnings, inventory_warning)
@@ -228,7 +234,7 @@ function reports.overall(state)
   }
 end
 
-function reports.year(state, year)
+function reports.year(state, year, opts)
   local unknown_time = false
   local sales = collect_sales(state, function(sale)
     local game_time = sale.game_time
@@ -243,7 +249,7 @@ function reports.year(state, year)
   local design_remaining = outstanding_design_capital(state)
   local pattern_remaining = outstanding_pattern_capital(state)
 
-  local warnings = build_base_warnings(state)
+  local warnings = build_base_warnings(state, opts)
   local inventory_total, inventory_warning = inventory_value(state)
   if inventory_warning then
     table.insert(warnings, inventory_warning)
@@ -273,7 +279,7 @@ function reports.year(state, year)
   }
 end
 
-function reports.order(state, order_id)
+function reports.order(state, order_id, opts)
   local order = state.orders[order_id]
   if not order then
     error("Order " .. order_id .. " not found")
@@ -285,7 +291,7 @@ function reports.order(state, order_id)
   local design_remaining = outstanding_design_capital(state)
   local pattern_remaining = outstanding_pattern_capital(state)
 
-  local warnings = build_base_warnings(state)
+  local warnings = build_base_warnings(state, opts)
   if design_remaining > 0 then
     table.insert(warnings, "WARNING: Design capital remaining > 0")
   end
@@ -352,7 +358,7 @@ function reports.design(state, design_id, opts)
     pattern_remaining = state.pattern_pools[design.pattern_pool_id].capital_remaining_gold
   end
 
-  local warnings = build_base_warnings(state)
+  local warnings = build_base_warnings(state, opts)
   if unknown_time and year_filter then
     table.insert(warnings, "WARNING: Some sales have unknown game time and were excluded")
   end
