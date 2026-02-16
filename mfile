@@ -1,0 +1,9 @@
+{
+  "package": "achaeadex-ledger",
+  "title": "AchaeaDex Ledger",
+  "description": "Profit & Loss tracking for Achaea crafting flows (Mudlet) -- with strict accounting, pattern pools, and design cost recovery.",
+  "version": "0.1.0",
+  "author": "keneanung",
+  "icon": "logo.svg",
+  "outputFile": true
+}

@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none">
+  <!-- Outer seal -->
+  <circle cx="256" cy="256" r="212" stroke="currentColor" stroke-width="18"/>
+  <circle cx="256" cy="256" r="184" stroke="currentColor" stroke-width="6" opacity="0.35"/>
+
+  <!-- Loom / ledger grid -->
+  <rect x="156" y="170" width="200" height="180" rx="18" stroke="currentColor" stroke-width="12"/>
+  <path d="M196 170 V350 M236 170 V350 M276 170 V350 M316 170 V350" stroke="currentColor" stroke-width="6" opacity="0.35"/>
+  <path d="M156 210 H356 M156 250 H356 M156 290 H356 M156 330 H356" stroke="currentColor" stroke-width="6" opacity="0.35"/>
+
+  <!-- Silver thread diagonal -->
+  <path d="M178 332 C220 280, 260 284, 308 236 C340 204, 360 194, 392 192"
+        stroke="currentColor" stroke-width="14" stroke-linecap="round"/>
+
+  <!-- Needle tip -->
+  <path d="M392 192 L414 170" stroke="currentColor" stroke-width="14" stroke-linecap="round"/>
+  <circle cx="414" cy="170" r="10" fill="currentColor"/>
+</svg>

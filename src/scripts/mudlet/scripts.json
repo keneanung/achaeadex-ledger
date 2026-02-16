@@ -1,0 +1,14 @@
+[
+  {
+    "name": "config",
+    "isActive": "yes"
+  },
+  {
+    "name": "render",
+    "isActive": "yes"
+  },
+  {
+    "name": "commands",
+    "isActive": "yes"
+  }
+]

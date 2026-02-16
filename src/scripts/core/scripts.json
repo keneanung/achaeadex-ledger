@@ -1,0 +1,50 @@
+[
+  {
+    "name": "inventory",
+    "isActive": "yes"
+  },
+  {
+    "name": "schema",
+    "isActive": "yes"
+  },
+  {
+    "name": "ledger",
+    "isActive": "yes"
+  },
+  {
+    "name": "pattern_pools",
+    "isActive": "yes"
+  },
+  {
+    "name": "designs",
+    "isActive": "yes"
+  },
+  {
+    "name": "recovery",
+    "isActive": "yes"
+  },
+  {
+    "name": "simulator",
+    "isActive": "yes"
+  },
+  {
+    "name": "deferred_processes",
+    "isActive": "yes"
+  },
+  {
+    "name": "json",
+    "isActive": "yes"
+  },
+  {
+    "name": "reports",
+    "isActive": "yes"
+  },
+  {
+    "name": "id_generator",
+    "isActive": "yes"
+  },
+  {
+    "name": "listings",
+    "isActive": "yes"
+  }
+]

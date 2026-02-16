@@ -1,0 +1,7 @@
+[
+  {
+    "name": "adex",
+    "isActive": "yes",
+    "regex": "^adex(?:\\s+(.*))?$"
+  }
+]
