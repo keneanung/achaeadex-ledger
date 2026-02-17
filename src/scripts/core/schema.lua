@@ -110,6 +110,25 @@ schema.migrations = {
     ALTER TABLE sales ADD COLUMN game_time_day INTEGER;
     ALTER TABLE sales ADD COLUMN game_time_hour INTEGER;
     ALTER TABLE sales ADD COLUMN game_time_minute INTEGER;
+  ]],
+  [3] = [[
+    ALTER TABLE designs ADD COLUMN capital_remaining_gold INTEGER NOT NULL DEFAULT 0;
+
+    CREATE INDEX IF NOT EXISTS idx_ledger_events_ts ON ledger_events(ts);
+    CREATE INDEX IF NOT EXISTS idx_sales_item_id ON sales(item_id);
+    CREATE INDEX IF NOT EXISTS idx_sales_sold_at ON sales(sold_at);
+    CREATE INDEX IF NOT EXISTS idx_crafted_items_design_id ON crafted_items(design_id);
+    CREATE INDEX IF NOT EXISTS idx_crafted_items_item_id ON crafted_items(item_id);
+    CREATE INDEX IF NOT EXISTS idx_pattern_pools_type_status ON pattern_pools(pattern_type, status);
+    CREATE INDEX IF NOT EXISTS idx_designs_type ON designs(design_type);
+    CREATE INDEX IF NOT EXISTS idx_designs_provenance ON designs(provenance);
+    CREATE INDEX IF NOT EXISTS idx_designs_recovery ON designs(recovery_enabled);
+    CREATE INDEX IF NOT EXISTS idx_order_sales_order_id ON order_sales(order_id);
+    CREATE INDEX IF NOT EXISTS idx_order_sales_sale_id ON order_sales(sale_id);
+    CREATE INDEX IF NOT EXISTS idx_process_instances_status ON process_instances(status);
+    CREATE INDEX IF NOT EXISTS idx_process_instances_process_id ON process_instances(process_id);
+    CREATE INDEX IF NOT EXISTS idx_design_id_aliases_design_id ON design_id_aliases(design_id);
+    CREATE INDEX IF NOT EXISTS idx_design_appearance_aliases_design_id ON design_appearance_aliases(design_id);
   ]]
 }
 

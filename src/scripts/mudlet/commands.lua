@@ -438,6 +438,20 @@ local help_topics = {
         example = "adex config get time-cost"
       }
     }
+  },
+  maintenance = {
+    title = "Maintenance",
+    purpose = "Rebuild projections or show DB stats.",
+    commands = {
+      {
+        usage = "adex maintenance stats",
+        example = "adex maintenance stats"
+      },
+      {
+        usage = "adex maintenance rebuild",
+        example = "adex maintenance rebuild"
+      }
+    }
   }
 }
 
@@ -478,7 +492,7 @@ function commands.help(topic)
     })
 
     render.section("Topics")
-    local order = { "inv", "broker", "pattern", "design", "order", "process", "craft", "sell", "report", "list", "sim", "config" }
+    local order = { "inv", "broker", "pattern", "design", "order", "process", "craft", "sell", "report", "list", "sim", "config", "maintenance" }
     local rows = {}
     for _, topic_name in ipairs(order) do
       local entry = help_topics[topic_name]
@@ -504,7 +518,7 @@ function commands.help(topic)
   out_plain("  operational cost: material WAC + fees + time cost per item")
   out_plain("  true profit: profit after design and pattern capital recovery")
   out_plain("Commands:")
-  local order = { "inv", "broker", "pattern", "design", "order", "process", "craft", "sell", "report", "list", "sim", "config" }
+  local order = { "inv", "broker", "pattern", "design", "order", "process", "craft", "sell", "report", "list", "sim", "config", "maintenance" }
   for _, topic_name in ipairs(order) do
     local entry = help_topics[topic_name]
     if entry then
@@ -578,6 +592,54 @@ function commands.handle(input)
   end
 
   local state = get_state()
+
+  if cmd == "maintenance" and tokens[2] == "stats" then
+    local store = _G.AchaeadexLedger.Mudlet.EventStore
+    if not store or type(store.stats) ~= "function" then
+      error_out("event store does not support stats")
+      return
+    end
+    local stats = store:stats()
+    render.section("Maintenance Stats")
+    render.kv_block({
+      { label = "Ledger events", value = tostring(stats.event_count or 0) },
+      { label = "Last event id", value = tostring(stats.last_event_id or 0) },
+      { label = "DB size (bytes)", value = tostring(stats.db_size_bytes or 0) }
+    })
+    return
+  end
+
+  if cmd == "maintenance" and tokens[2] == "rebuild" then
+    local store = _G.AchaeadexLedger.Mudlet.EventStore
+    if not store or type(store.rebuild_projections) ~= "function" then
+      error_out("event store does not support rebuild")
+      return
+    end
+    local counts = store:rebuild_projections()
+    local fresh_state = ledger.new(store)
+    local events = store:read_all()
+    for _, event in ipairs(events) do
+      local ok, err = pcall(ledger.apply_event, fresh_state, event)
+      if not ok then
+        error_out("rebuild failed applying event " .. tostring(event.id) .. ": " .. tostring(err))
+        return
+      end
+    end
+    _G.AchaeadexLedger.Mudlet.State = fresh_state
+    render.section("Maintenance Rebuild")
+    render.kv_block({
+      { label = "Designs", value = tostring(counts.designs or 0) },
+      { label = "Pattern pools", value = tostring(counts.pattern_pools or 0) },
+      { label = "Crafted items", value = tostring(counts.crafted_items or 0) },
+      { label = "Sales", value = tostring(counts.sales or 0) },
+      { label = "Orders", value = tostring(counts.orders or 0) },
+      { label = "Order sales", value = tostring(counts.order_sales or 0) },
+      { label = "Process instances", value = tostring(counts.process_instances or 0) },
+      { label = "Design aliases", value = tostring(counts.design_id_aliases or 0) },
+      { label = "Appearance aliases", value = tostring(counts.design_appearance_aliases or 0) }
+    })
+    return
+  end
 
   if cmd == "inv" and tokens[2] == "init" then
     local commodity = tokens[3]

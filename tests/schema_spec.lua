@@ -160,6 +160,35 @@ describe("Schema Migration", function()
       db:close()
     end)
   end)
+
+  describe("migration v3", function()
+    it("should add design capital remaining and indexes", function()
+      local db = lsqlite3.open_memory()
+      schema.migrate(db, 3)
+
+      local columns = {}
+      local stmt = db:prepare("PRAGMA table_info(designs)")
+      for row in stmt:nrows() do
+        columns[row.name] = true
+      end
+      stmt:finalize()
+
+      assert.is_true(columns.capital_remaining_gold, "designs.capital_remaining_gold should exist")
+
+      local index_names = {}
+      stmt = db:prepare("PRAGMA index_list(designs)")
+      for row in stmt:nrows() do
+        index_names[row.name] = true
+      end
+      stmt:finalize()
+
+      assert.is_true(index_names.idx_designs_type, "idx_designs_type should exist")
+      assert.is_true(index_names.idx_designs_provenance, "idx_designs_provenance should exist")
+      assert.is_true(index_names.idx_designs_recovery, "idx_designs_recovery should exist")
+
+      db:close()
+    end)
+  end)
   
   describe("migrate function", function()
     it("should migrate from version 0 to 1", function()
@@ -168,8 +197,8 @@ describe("Schema Migration", function()
       local initial_version = schema.get_version(db)
       assert.are.equal(0, initial_version)
       
-      local final_version = schema.migrate(db, 2)
-      assert.are.equal(2, final_version)
+      local final_version = schema.migrate(db, 3)
+      assert.are.equal(3, final_version)
       
       db:close()
     end)
@@ -201,8 +230,8 @@ describe("Schema Migration", function()
       
       local version = schema.migrate(db)
       
-      -- Should migrate to the latest version (currently 2)
-      assert.are.equal(2, version)
+      -- Should migrate to the latest version (currently 3)
+      assert.are.equal(3, version)
       
       db:close()
     end)

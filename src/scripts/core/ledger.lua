@@ -110,7 +110,11 @@ function ledger.record_event(state, event_type, payload)
     ts = os.date("!%Y-%m-%dT%H:%M:%SZ")
   }
 
-  event.id = state.event_store:append(event)
+  if type(state.event_store.append_event_and_apply) == "function" then
+    event.id = state.event_store:append_event_and_apply(event)
+  else
+    event.id = state.event_store:append(event)
+  end
 
   return event
 end

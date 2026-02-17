@@ -25,6 +25,16 @@ local function get_json()
   return _G.AchaeadexLedger.Core.Json
 end
 
+local function get_projector()
+  if not _G.AchaeadexLedger
+    or not _G.AchaeadexLedger.Core
+    or not _G.AchaeadexLedger.Core.Projector then
+    error("AchaeadexLedger.Core.Projector is not loaded")
+  end
+
+  return _G.AchaeadexLedger.Core.Projector
+end
+
 local function exec_sql(conn, sql)
   local result, err = conn:execute(sql)
   if not result then
@@ -133,6 +143,46 @@ function sqlite_store:append(event)
   return row and tonumber(row.id) or 0
 end
 
+function sqlite_store:append_event_and_apply(event)
+  assert(type(event) == "table", "event must be a table")
+  assert(type(event.event_type) == "string", "event_type must be a string")
+
+  local json = get_json()
+  local projector = get_projector()
+  local ts = event.ts or os.date("!%Y-%m-%dT%H:%M:%SZ")
+  local payload_json = json.encode(event.payload or {})
+
+  exec_sql(self.conn, "BEGIN")
+
+  local ok, err = pcall(function()
+    local insert_sql = string.format(
+      "INSERT INTO ledger_events (ts, event_type, payload_json) VALUES ('%s', '%s', '%s')",
+      ts:gsub("'", "''"),
+      event.event_type:gsub("'", "''"),
+      payload_json:gsub("'", "''")
+    )
+
+    exec_sql(self.conn, insert_sql)
+
+    local cur = assert(self.conn:execute("SELECT last_insert_rowid() AS id"))
+    local row = cur:fetch({}, "a")
+    cur:close()
+    event.id = row and tonumber(row.id) or 0
+    event.ts = ts
+
+    projector.apply(self.conn, event)
+  end)
+
+  if not ok then
+    exec_sql(self.conn, "ROLLBACK")
+    error(err)
+  end
+
+  exec_sql(self.conn, "COMMIT")
+
+  return event.id
+end
+
 function sqlite_store:read_all()
   local json = get_json()
   local events = {}
@@ -152,6 +202,80 @@ function sqlite_store:read_all()
   cur:close()
 
   return events
+end
+
+function sqlite_store:rebuild_projections()
+  local projector = get_projector()
+  exec_sql(self.conn, "BEGIN")
+
+  local ok, err = pcall(function()
+    projector.truncate_domains(self.conn)
+    local events = self:read_all()
+    for _, event in ipairs(events) do
+      projector.apply(self.conn, event)
+    end
+  end)
+
+  if not ok then
+    exec_sql(self.conn, "ROLLBACK")
+    error(err)
+  end
+
+  exec_sql(self.conn, "COMMIT")
+
+  return self:domain_counts()
+end
+
+function sqlite_store:domain_counts()
+  local tables = {
+    "designs",
+    "design_id_aliases",
+    "design_appearance_aliases",
+    "pattern_pools",
+    "crafted_items",
+    "sales",
+    "orders",
+    "order_sales",
+    "process_instances"
+  }
+
+  local counts = {}
+  for _, name in ipairs(tables) do
+    local cur = assert(self.conn:execute("SELECT COUNT(*) AS count FROM " .. name))
+    local row = cur:fetch({}, "a")
+    cur:close()
+    counts[name] = row and tonumber(row.count) or 0
+  end
+
+  return counts
+end
+
+function sqlite_store:stats()
+  local cur = assert(self.conn:execute("SELECT COUNT(*) AS count, MAX(id) AS last_id FROM ledger_events"))
+  local row = cur:fetch({}, "a")
+  cur:close()
+
+  local page_count = 0
+  local page_size = 0
+  local pc = assert(self.conn:execute("PRAGMA page_count"))
+  local pr = pc:fetch({}, "a")
+  pc:close()
+  if pr then
+    page_count = tonumber(pr.page_count) or 0
+  end
+
+  local ps = assert(self.conn:execute("PRAGMA page_size"))
+  local psr = ps:fetch({}, "a")
+  ps:close()
+  if psr then
+    page_size = tonumber(psr.page_size) or 0
+  end
+
+  return {
+    event_count = row and tonumber(row.count) or 0,
+    last_event_id = row and tonumber(row.last_id) or 0,
+    db_size_bytes = page_count * page_size
+  }
 end
 
 _G.AchaeadexLedger.Core.LuaSQLEventStore = sqlite_store

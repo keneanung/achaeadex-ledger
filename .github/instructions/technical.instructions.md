@@ -40,6 +40,43 @@ Use SQLite for persistence.
 Schema must be versioned.
 
 ------------------------------------------------------------
+PERSISTENCE MODEL (AUTHORITATIVE LEDGER + MATERIALIZED PROJECTIONS)
+------------------------------------------------------------
+
+The system uses a hybrid model:
+
+1) `ledger_events` is the authoritative, append-only audit log.
+   - Every user-visible action MUST produce one or more ledger events.
+   - Events are immutable once written.
+
+2) Domain tables (designs, pattern_pools, crafted_items, sales, orders, process_instances, alias tables)
+   are MATERIALIZED PROJECTIONS (read models) derived from the ledger.
+   - They exist for fast listing and reporting.
+   - They MUST be updated only by applying ledger events.
+   - Code MUST NOT write to domain tables “directly” as a primary action.
+
+3) Transactional guarantee:
+   - Appending an event and applying it to projections MUST occur in the same SQLite transaction:
+     BEGIN
+       insert ledger_events
+       apply event(s) to domain tables
+     COMMIT
+   - If applying to projections fails, the event must not be committed.
+
+4) Rebuild capability (required):
+   - Provide a rebuild mechanism that can recreate domain tables from `ledger_events` deterministically.
+   - This is used for integrity checks, recovery, and future migrations.
+
+5) Single-writer assumption (MVP):
+   - Assume a single Mudlet client writes to the DB at a time.
+   - Do not implement multi-writer concurrency for MVP.
+
+6) Read path:
+   - Reports and list commands should read from the domain tables for performance and simplicity.
+   - If any report needs derived values not stored, it may compute them from domain tables or from the event stream,
+     but must remain deterministic.
+
+------------------------------------------------------------
 MINIMUM TABLES
 ------------------------------------------------------------
 
@@ -122,32 +159,59 @@ process_instances(
 )
 
 ------------------------------------------------------------
-EVENT TYPES
+INDEXES (REQUIRED)
 ------------------------------------------------------------
 
-OPENING_INVENTORY
-BROKER_BUY
-BROKER_SELL
+Add indexes to keep reads fast:
 
--- Immediate (fully-known) process application:
-PROCESS_APPLY
+- ledger_events(id) (implicit by PK), and ledger_events(ts) if used for filtering
+- sales(item_id), sales(sold_at)
+- crafted_items(design_id), crafted_items(item_id)
+- pattern_pools(pattern_type, status)
+- designs(design_type), designs(provenance), designs(recovery_enabled)
+- order_sales(order_id), order_sales(sale_id)
+- process_instances(status), process_instances(process_id)
+- design_id_aliases(design_id)
+- design_appearance_aliases(design_id)
 
--- Deferred process lifecycle:
-PROCESS_START
-PROCESS_ADD_INPUTS
-PROCESS_ADD_FEE
-PROCESS_COMPLETE
-PROCESS_ABORT
+------------------------------------------------------------
+EVENT TYPES (REQUIRED FOR REBUILD)
+------------------------------------------------------------
 
-DESIGN_COST
-PATTERN_ACTIVATE
-PATTERN_DEACTIVATE
-DESIGN_SET_PER_ITEM_FEE
-DESIGN_REGISTER_ALIAS
-DESIGN_REGISTER_APPEARANCE
-CRAFT_ITEM
-SELL_ITEM
-CRAFT_RESOLVE_DESIGN
+All of the following user-visible mutations MUST be represented as events in ledger_events:
+
+Inventory:
+- OPENING_INVENTORY
+- BROKER_BUY
+
+Processes:
+- PROCESS_APPLY
+- PROCESS_START
+- PROCESS_ADD_INPUTS
+- PROCESS_ADD_FEE
+- PROCESS_COMPLETE
+- PROCESS_ABORT
+
+Patterns:
+- PATTERN_ACTIVATE
+- PATTERN_DEACTIVATE
+
+Designs:
+- DESIGN_START (or equivalent creation event)
+- DESIGN_COST
+- DESIGN_SET_PER_ITEM_FEE
+- DESIGN_REGISTER_ALIAS
+- DESIGN_REGISTER_APPEARANCE
+
+Crafting & Sales:
+- CRAFT_ITEM
+- CRAFT_RESOLVE_DESIGN
+- SELL_ITEM
+
+Orders:
+- ORDER_CREATE
+- ORDER_ADD_SALE
+- ORDER_CLOSE (optional but recommended)
 
 PROCESS_APPLY must support:
 {
@@ -282,6 +346,22 @@ On SELL_ITEM:
 Never compute amortization per unit.
 
 ------------------------------------------------------------
+PROJECTOR (APPLY EVENTS TO PROJECTIONS)
+------------------------------------------------------------
+
+1) Implement an event projector that applies a ledger event to the domain tables.
+2) The projector MUST be deterministic and idempotent for rebuild purposes.
+3) The online write path MUST be:
+   - append event -> apply projector -> commit transaction
+4) The rebuild path MUST:
+   - truncate domain tables
+   - replay all ledger_events in order (by id)
+   - apply projector for each event
+   - produce the same domain table state as normal operation
+
+5) Reports and lists should use the domain tables, not recompute everything by replaying events each time.
+
+------------------------------------------------------------
 COMMANDS (MVP)
 ------------------------------------------------------------
 
@@ -318,6 +398,24 @@ sim units <design_id> <units>
 
 Manual entry only required for MVP.
 Triggers/parsing are optional and must not be required.
+
+------------------------------------------------------------
+MAINTENANCE COMMANDS (MVP)
+------------------------------------------------------------
+
+Provide at least:
+
+- adex maintenance stats
+  - prints: ledger_events count, DB size (if available), last event id, and optionally last rebuild timestamp
+
+- adex maintenance rebuild
+  - rebuilds domain tables by replaying ledger_events
+  - prints: counts per domain table after rebuild
+  - MUST NOT lose ledger_events
+
+Optional:
+- adex maintenance vacuum
+  - runs SQLite VACUUM (manual, user-invoked)
 
 ------------------------------------------------------------
 BUILD

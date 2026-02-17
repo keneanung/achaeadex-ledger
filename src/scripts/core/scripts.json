@@ -24,6 +24,10 @@
     "isActive": "yes"
   },
   {
+    "name": "projector",
+    "isActive": "yes"
+  },
+  {
     "name": "simulator",
     "isActive": "yes"
   },

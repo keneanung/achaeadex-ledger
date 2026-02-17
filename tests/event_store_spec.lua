@@ -16,6 +16,8 @@ describe("EventStore", function()
     dofile("src/scripts/core/pattern_pools.lua")
     dofile("src/scripts/core/designs.lua")
     dofile("src/scripts/core/recovery.lua")
+    dofile("src/scripts/core/projector.lua")
+    dofile("src/scripts/core/reports.lua")
     dofile("src/scripts/core/schema.lua")
     dofile("src/scripts/core/ledger.lua")
     dofile("src/scripts/core/storage/memory_event_store.lua")
@@ -105,5 +107,54 @@ describe("EventStore", function()
     assert.are.equal(state1.pattern_pools["P1"].capital_remaining_gold, state2.pattern_pools["P1"].capital_remaining_gold)
     assert.are.equal(state1.process_instances["PX"].status, state2.process_instances["PX"].status)
     assert.are.equal(state1.designs["D1"].pattern_pool_id, state2.designs["D1"].pattern_pool_id)
+  end)
+
+  it("rebuilds projections deterministically", function()
+    if not luasql then
+      pending("LuaSQL sqlite3 not available")
+      return
+    end
+
+    local db_path = os.tmpname()
+    local reports = _G.AchaeadexLedger.Core.Reports
+    local store = sqlite_store.new(db_path)
+    local state = ledger.new(store)
+
+    ledger.apply_pattern_activate(state, "P1", "shirt", "Pool", 150)
+    ledger.apply_design_start(state, "D1", "shirt", "Design 1", "private", 1)
+    ledger.apply_design_cost(state, "D1", 6000, "submission")
+    ledger.apply_design_set_fee(state, "D1", 10)
+    ledger.apply_design_alias(state, "D1", "1234", "pre_final", 1)
+    ledger.apply_craft_item(state, "I1", "D1", 50, "{}", "simple shirt")
+    ledger.apply_sell_item(state, "S1", "I1", 200, { year = 650 })
+    ledger.apply_opening_inventory(state, "fibre", 10, 5)
+    ledger.apply_process_start(state, "PX", "refine", { fibre = 4 }, 1)
+    ledger.apply_process_complete(state, "PX", { cloth = 4 })
+
+    local report_before = reports.overall(state)
+    local before = store:domain_counts()
+    store:rebuild_projections()
+    local after = store:domain_counts()
+
+    assert.are.same(before, after)
+
+    local events = store:read_all()
+    local fresh = ledger.new(store)
+    for _, event in ipairs(events) do
+      ledger.apply_event(fresh, event)
+    end
+    local report_after = reports.overall(fresh)
+
+    assert.are.same(report_before.totals, report_after.totals)
+
+    local cur = assert(store.conn:execute("SELECT capital_remaining_gold FROM designs WHERE design_id = 'D1'"))
+    local row = cur:fetch({}, "a")
+    cur:close()
+    assert.is_not_nil(row)
+
+    local cur2 = assert(store.conn:execute("SELECT status FROM process_instances WHERE process_instance_id = 'PX'"))
+    local row2 = cur2:fetch({}, "a")
+    cur2:close()
+    assert.are.equal("completed", row2.status)
   end)
 end)
