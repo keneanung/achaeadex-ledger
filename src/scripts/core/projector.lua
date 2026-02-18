@@ -15,6 +15,16 @@ local function get_recovery()
   return _G.AchaeadexLedger.Core.Recovery
 end
 
+local function get_json()
+  if not _G.AchaeadexLedger
+    or not _G.AchaeadexLedger.Core
+    or not _G.AchaeadexLedger.Core.Json then
+    error("AchaeadexLedger.Core.Json is not loaded")
+  end
+
+  return _G.AchaeadexLedger.Core.Json
+end
+
 local function sql_value(value)
   if value == nil then
     return "NULL"
@@ -105,9 +115,11 @@ function projector.apply(conn, event)
   local ts = event.ts or os.date("!%Y-%m-%dT%H:%M:%SZ")
 
   if event_type == "DESIGN_START" then
+    local json = get_json()
+    local bom_json = payload.bom and json.encode(payload.bom) or nil
     exec_sql(conn, string.format(
-      "INSERT OR REPLACE INTO designs (design_id, design_type, name, created_at, pattern_pool_id, per_item_fee_gold, provenance, recovery_enabled, status, capital_remaining_gold) " ..
-      "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+      "INSERT OR REPLACE INTO designs (design_id, design_type, name, created_at, pattern_pool_id, per_item_fee_gold, provenance, recovery_enabled, status, capital_remaining_gold, bom_json) " ..
+      "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
       sql_value(payload.design_id),
       sql_value(payload.design_type),
       sql_value(payload.name),
@@ -116,8 +128,9 @@ function projector.apply(conn, event)
       sql_value(0),
       sql_value(payload.provenance),
       sql_value(payload.recovery_enabled),
-      sql_value("in_progress"),
-      sql_value(0)
+      sql_value(payload.status or "in_progress"),
+      sql_value(0),
+      sql_value(bom_json)
     ))
     return
   end
@@ -135,6 +148,31 @@ function projector.apply(conn, event)
     exec_sql(conn, string.format(
       "UPDATE designs SET per_item_fee_gold = %s WHERE design_id = %s",
       sql_value(payload.amount or 0),
+      sql_value(resolve_design_id(conn, payload.design_id))
+    ))
+    return
+  end
+
+  if event_type == "DESIGN_SET_BOM" then
+    local json = get_json()
+    local bom_json = payload.bom and json.encode(payload.bom) or nil
+    exec_sql(conn, string.format(
+      "UPDATE designs SET bom_json = %s WHERE design_id = %s",
+      sql_value(bom_json),
+      sql_value(resolve_design_id(conn, payload.design_id))
+    ))
+    return
+  end
+
+  if event_type == "DESIGN_UPDATE" then
+    exec_sql(conn, string.format(
+      "UPDATE designs SET design_type = COALESCE(%s, design_type), name = COALESCE(%s, name), provenance = COALESCE(%s, provenance), recovery_enabled = COALESCE(%s, recovery_enabled), status = COALESCE(%s, status), pattern_pool_id = %s WHERE design_id = %s",
+      sql_value(payload.design_type),
+      sql_value(payload.name),
+      sql_value(payload.provenance),
+      sql_value(payload.recovery_enabled),
+      sql_value(payload.status),
+      sql_value(payload.pattern_pool_id),
       sql_value(resolve_design_id(conn, payload.design_id))
     ))
     return
@@ -189,15 +227,19 @@ function projector.apply(conn, event)
   end
 
   if event_type == "CRAFT_ITEM" then
+    local json = get_json()
+    local materials_json = payload.materials and json.encode(payload.materials) or nil
     exec_sql(conn, string.format(
-      "INSERT OR REPLACE INTO crafted_items (item_id, design_id, crafted_at, operational_cost_gold, cost_breakdown_json, appearance_key) " ..
-      "VALUES (%s, %s, %s, %s, %s, %s)",
+      "INSERT OR REPLACE INTO crafted_items (item_id, design_id, crafted_at, operational_cost_gold, cost_breakdown_json, appearance_key, materials_json, materials_source) " ..
+      "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
       sql_value(payload.item_id),
       sql_value(payload.design_id),
       sql_value(payload.crafted_at or ts),
       sql_value(payload.operational_cost_gold or 0),
       sql_value(payload.cost_breakdown_json or "{}"),
-      sql_value(payload.appearance_key)
+      sql_value(payload.appearance_key),
+      sql_value(materials_json),
+      sql_value(payload.materials_source)
     ))
     return
   end

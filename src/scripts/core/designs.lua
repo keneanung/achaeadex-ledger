@@ -19,9 +19,13 @@ local function get_pattern_pools()
   return _G.AchaeadexLedger.Core.PatternPools
 end
 
-function designs.create(state, design_id, design_type, name, provenance, recovery_enabled)
+function designs.create(state, design_id, design_type, name, provenance, recovery_enabled, opts)
   assert(type(design_id) == "string", "design_id must be a string")
   assert(type(design_type) == "string", "design_type must be a string")
+
+  if opts ~= nil and type(opts) ~= "table" then
+    error("opts must be a table when provided")
+  end
 
   ensure_state(state)
 
@@ -43,6 +47,7 @@ function designs.create(state, design_id, design_type, name, provenance, recover
     end
   end
 
+  local status = opts and opts.status or "in_progress"
   local design = {
     design_id = design_id,
     design_type = design_type,
@@ -52,11 +57,64 @@ function designs.create(state, design_id, design_type, name, provenance, recover
     per_item_fee_gold = 0,
     provenance = provenance,
     recovery_enabled = recovery_enabled,
-    status = "in_progress",
-    capital_remaining = 0
+    status = status,
+    capital_remaining = 0,
+    bom = opts and opts.bom or nil
   }
 
   state.designs[design_id] = design
+
+  return design
+end
+
+function designs.set_bom(state, design_id, bom)
+  ensure_state(state)
+
+  local design = state.designs[design_id]
+  if not design then
+    error("Design " .. design_id .. " not found")
+  end
+
+  design.bom = bom
+
+  return design
+end
+
+function designs.update(state, design_id, fields)
+  ensure_state(state)
+  assert(type(fields) == "table", "fields must be a table")
+
+  local design = state.designs[design_id]
+  if not design then
+    error("Design " .. design_id .. " not found")
+  end
+
+  if fields.name ~= nil then
+    design.name = fields.name
+  end
+  if fields.design_type then
+    design.design_type = fields.design_type
+  end
+  if fields.provenance then
+    design.provenance = fields.provenance
+  end
+  if fields.recovery_enabled ~= nil then
+    design.recovery_enabled = fields.recovery_enabled
+  end
+  if fields.status then
+    design.status = fields.status
+  end
+
+  if design.recovery_enabled == 1 then
+    local pattern_pools = get_pattern_pools()
+    local pool_id = pattern_pools.get_active_pool_id(state, design.design_type)
+    if not pool_id then
+      error("No active pattern pool for type: " .. design.design_type)
+    end
+    design.pattern_pool_id = pool_id
+  else
+    design.pattern_pool_id = nil
+  end
 
   return design
 end

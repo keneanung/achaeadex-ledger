@@ -129,6 +129,11 @@ schema.migrations = {
     CREATE INDEX IF NOT EXISTS idx_process_instances_process_id ON process_instances(process_id);
     CREATE INDEX IF NOT EXISTS idx_design_id_aliases_design_id ON design_id_aliases(design_id);
     CREATE INDEX IF NOT EXISTS idx_design_appearance_aliases_design_id ON design_appearance_aliases(design_id);
+  ]],
+  [4] = [[
+    ALTER TABLE designs ADD COLUMN bom_json TEXT;
+    ALTER TABLE crafted_items ADD COLUMN materials_json TEXT;
+    ALTER TABLE crafted_items ADD COLUMN materials_source TEXT;
   ]]
 }
 

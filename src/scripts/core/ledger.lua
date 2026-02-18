@@ -214,7 +214,15 @@ function ledger.apply_event(state, event)
     return deferred.abort(state, payload.process_instance_id, payload.disposition, payload.note, payload.completed_at)
   elseif event_type == "DESIGN_START" then
     local designs = get_designs()
-    local design = designs.create(state, payload.design_id, payload.design_type, payload.name, payload.provenance, payload.recovery_enabled)
+    local design = designs.create(
+      state,
+      payload.design_id,
+      payload.design_type,
+      payload.name,
+      payload.provenance,
+      payload.recovery_enabled,
+      { status = payload.status, bom = payload.bom }
+    )
     if payload.pattern_pool_id then
       design.pattern_pool_id = payload.pattern_pool_id
     end
@@ -228,6 +236,23 @@ function ledger.apply_event(state, event)
   elseif event_type == "DESIGN_SET_PER_ITEM_FEE" then
     local resolved_design_id = resolve_design_id(state, payload.design_id)
     state.designs[resolved_design_id].per_item_fee_gold = payload.amount
+  elseif event_type == "DESIGN_SET_BOM" then
+    local designs = get_designs()
+    local resolved_design_id = resolve_design_id(state, payload.design_id)
+    designs.set_bom(state, resolved_design_id, payload.bom)
+  elseif event_type == "DESIGN_UPDATE" then
+    local designs = get_designs()
+    local resolved_design_id = resolve_design_id(state, payload.design_id)
+    designs.update(state, resolved_design_id, {
+      name = payload.name,
+      design_type = payload.design_type,
+      provenance = payload.provenance,
+      recovery_enabled = payload.recovery_enabled,
+      status = payload.status
+    })
+    if payload.pattern_pool_id ~= nil then
+      state.designs[resolved_design_id].pattern_pool_id = payload.pattern_pool_id
+    end
   elseif event_type == "PATTERN_ACTIVATE" then
     local pattern_pools = get_pattern_pools()
     pattern_pools.activate(state, payload.pattern_pool_id, payload.pattern_type, payload.pattern_name, payload.capital_initial, payload.activated_at)
@@ -271,13 +296,23 @@ function ledger.apply_event(state, event)
     order.status = payload.status or order.status
     order.closed_at = payload.closed_at
   elseif event_type == "CRAFT_ITEM" then
+    local inventory = get_inventory()
+    local materials = payload.materials or nil
+    if materials then
+      for commodity, qty in pairs(materials) do
+        inventory.remove(state.inventory, commodity, qty)
+      end
+    end
     state.crafted_items[payload.item_id] = {
       item_id = payload.item_id,
       design_id = payload.design_id,
       crafted_at = payload.crafted_at,
       operational_cost_gold = payload.operational_cost_gold,
       cost_breakdown_json = payload.cost_breakdown_json,
-      appearance_key = payload.appearance_key
+      appearance_key = payload.appearance_key,
+      materials = payload.materials,
+      materials_source = payload.materials_source,
+      materials_cost_gold = payload.materials_cost_gold
     }
   elseif event_type == "CRAFT_RESOLVE_DESIGN" then
     local item = state.crafted_items[payload.item_id]
@@ -446,6 +481,55 @@ function ledger.apply_design_set_fee(state, design_id, amount)
   return state
 end
 
+function ledger.apply_design_set_bom(state, design_id, bom)
+  local resolved_design_id = resolve_design_id(state, design_id)
+  local event = ledger.record_event(state, "DESIGN_SET_BOM", {
+    design_id = resolved_design_id,
+    bom = bom
+  })
+
+  ledger.apply_event(state, event)
+
+  return state
+end
+
+function ledger.apply_design_update(state, design_id, fields)
+  local resolved_design_id = resolve_design_id(state, design_id)
+  local design = state.designs[resolved_design_id]
+  if not design then
+    error("Design " .. resolved_design_id .. " not found")
+  end
+
+  local target_type = fields.design_type or design.design_type
+  local target_recovery = fields.recovery_enabled
+  if target_recovery == nil then
+    target_recovery = design.recovery_enabled
+  end
+
+  local pattern_pool_id = nil
+  if target_recovery == 1 then
+    local pattern_pools = get_pattern_pools()
+    pattern_pool_id = pattern_pools.get_active_pool_id(state, target_type)
+    if not pattern_pool_id then
+      error("No active pattern pool for type: " .. target_type)
+    end
+  end
+
+  local event = ledger.record_event(state, "DESIGN_UPDATE", {
+    design_id = resolved_design_id,
+    name = fields.name,
+    design_type = fields.design_type,
+    provenance = fields.provenance,
+    recovery_enabled = fields.recovery_enabled,
+    status = fields.status,
+    pattern_pool_id = pattern_pool_id
+  })
+
+  ledger.apply_event(state, event)
+
+  return state
+end
+
 -- Process PATTERN_ACTIVATE event
 function ledger.apply_pattern_activate(state, pattern_pool_id, pattern_type, pattern_name, capital_initial)
   local activated_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
@@ -519,14 +603,125 @@ function ledger.apply_design_appearance(state, design_id, appearance_key, confid
   return state
 end
 
-function ledger.apply_craft_item(state, item_id, design_id, operational_cost_gold, cost_breakdown_json, appearance_key)
+local function ensure_design_or_stub(state, design_id, bom)
+  if not design_id then
+    return nil
+  end
+
+  if state.designs[design_id] then
+    return design_id
+  end
+
+  local alias = state.design_aliases[design_id]
+  if alias and alias.design_id then
+    return alias.design_id
+  end
+
+  local event = ledger.record_event(state, "DESIGN_START", {
+    design_id = design_id,
+    design_type = "unknown",
+    name = nil,
+    provenance = "public",
+    recovery_enabled = 0,
+    status = "stub",
+    created_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+  })
+
+  ledger.apply_event(state, event)
+
+  if bom then
+    ledger.apply_design_set_bom(state, design_id, bom)
+  end
+
+  return design_id
+end
+
+local function compute_material_cost(state, materials)
+  local inventory = get_inventory()
+  local total = 0
+  for commodity, qty in pairs(materials) do
+    if qty <= 0 then
+      error("Material quantity must be positive for " .. commodity)
+    end
+    local available = inventory.get_qty(state.inventory, commodity)
+    if available < qty then
+      error("Insufficient " .. commodity .. ": have " .. tostring(available) .. ", need " .. tostring(qty))
+    end
+    local unit_cost = inventory.get_unit_cost(state.inventory, commodity)
+    total = total + (unit_cost * qty)
+  end
+  return total
+end
+
+function ledger.apply_craft_item_auto(state, item_id, design_id, opts)
+  opts = opts or {}
+  local materials = opts.materials
+  local appearance_key = opts.appearance_key
+  local manual_cost = opts.manual_cost
+  local time_cost_gold = opts.time_cost_gold or 0
+  local time_hours = opts.time_hours or 0
+
+  local resolved_design_id = ensure_design_or_stub(state, design_id, materials)
+  local design = resolved_design_id and state.designs[resolved_design_id] or nil
+
+  local materials_source = nil
+  local materials_cost = 0
+  local materials_payload = nil
+
+  if materials and next(materials) ~= nil then
+    materials_source = "explicit"
+    materials_payload = materials
+    materials_cost = compute_material_cost(state, materials)
+  elseif design and design.bom and next(design.bom) ~= nil then
+    materials_source = "design_bom"
+    materials_payload = design.bom
+    materials_cost = compute_material_cost(state, design.bom)
+  elseif manual_cost ~= nil then
+    materials_source = "manual"
+    materials_cost = manual_cost
+  else
+    error("No materials provided and no design BOM available")
+  end
+
+  local per_item_fee = design and (design.per_item_fee_gold or 0) or 0
+  local operational_cost_gold = materials_cost + per_item_fee + time_cost_gold
+
+  local breakdown = {
+    materials_cost_gold = materials_cost,
+    materials_source = materials_source,
+    materials = materials_payload,
+    per_item_fee = per_item_fee,
+    time_hours = time_hours,
+    time_cost_gold = time_cost_gold
+  }
+
+  local json = _G.AchaeadexLedger.Core.Json
+  local breakdown_json = json and json.encode(breakdown) or "{}"
+
+  return ledger.apply_craft_item(
+    state,
+    item_id,
+    resolved_design_id,
+    operational_cost_gold,
+    breakdown_json,
+    appearance_key,
+    materials_payload,
+    materials_source,
+    materials_cost
+  )
+end
+
+function ledger.apply_craft_item(state, item_id, design_id, operational_cost_gold, cost_breakdown_json, appearance_key, materials, materials_source, materials_cost_gold)
   local event = ledger.record_event(state, "CRAFT_ITEM", {
     item_id = item_id,
     design_id = design_id,
     operational_cost_gold = operational_cost_gold,
     cost_breakdown_json = cost_breakdown_json,
     appearance_key = appearance_key,
-    crafted_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+    crafted_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    materials = materials,
+    materials_source = materials_source,
+    materials_cost_gold = materials_cost_gold
   })
 
   ledger.apply_event(state, event)

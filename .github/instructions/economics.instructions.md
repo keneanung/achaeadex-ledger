@@ -240,4 +240,82 @@ If units given:
 Invalid:
   price <= op_cost
   units <= 0
-technical.instructions.md
+
+------------------------------------------------------------
+DESIGN MATERIAL RECIPE (STANDARD BOM)
+------------------------------------------------------------
+
+Goal:
+- Avoid re-entering the same commodity costs on every craft.
+- Allow crafting to consume commodities deterministically based on a design-defined recipe (BOM).
+
+Definitions:
+- BOM (Bill of Materials): { commodity -> qty } representing the standard material inputs per crafted item.
+
+Rules:
+1) A design MAY define a standard BOM.
+   - BOM commodities are consumed from inventory at craft time using WAC.
+2) If a design has a BOM and the craft event does not explicitly provide materials:
+   - The BOM MUST be used as the material consumption for that craft.
+3) A craft MAY override the design BOM by explicitly providing a materials list.
+   - When overridden, the explicit materials list becomes the source of truth for that craft.
+4) If both a design BOM exists and explicit materials are provided:
+   - explicit materials take precedence (to support exceptional cases).
+5) Material consumption is part of OPERATIONAL COST (not capital).
+
+------------------------------------------------------------
+CRAFTING WITH EXPLICIT MATERIALS (UNKNOWN OR AD-HOC)
+------------------------------------------------------------
+
+Goal:
+- Support crafting when the design is unknown or not tracked, while still capturing material costs.
+
+Rules:
+1) A craft MAY specify explicit materials used:
+   - materials: { commodity -> qty }
+2) These materials MUST be consumed from inventory at craft time using WAC and included in operational cost breakdown.
+3) Per-item design production fees (if any) still apply if the craft is linked to a design that defines them.
+4) Time cost (if enabled) still applies.
+
+------------------------------------------------------------
+STUB DESIGNS (AUTO-CREATED ON UNKNOWN DESIGN)
+------------------------------------------------------------
+
+Goal:
+- When a craft references an unknown design, preserve traceability by creating a stub design record.
+
+Rules:
+1) If a craft is recorded with a design identifier that does not exist:
+   - The system MUST create a stub design automatically.
+2) Stub design properties:
+   - design_id: the provided identifier OR generated internal id (implementation choice)
+   - name: optional/unknown
+   - design_type: "unknown" (or a reserved type)
+   - provenance: "unknown" (or "private" with recovery_enabled=0; see note below)
+   - recovery_enabled: MUST default to 0
+   - per_item_fee_gold: default 0 unless later set
+   - pattern_pool_id: NULL
+   - BOM: set to the explicit materials provided for that craft, if present
+3) The user MUST be able to enrich stub designs later:
+   - set name/type/provenance/recovery flag
+   - add aliases/appearance mappings
+   - add/replace BOM
+4) Stub designs MUST NOT participate in capital recovery unless explicitly enabled later.
+
+Note:
+- If "unknown" provenance is not supported, use provenance=public and recovery_enabled=0 for stubs.
+
+------------------------------------------------------------
+OPERATIONAL COST BREAKDOWN REQUIREMENTS (CRAFT)
+------------------------------------------------------------
+
+For each crafted item, breakdown must be able to include:
+- materials_cost_gold (sum of consumed commodities at WAC)
+- per_item_fee_gold (if configured on design)
+- time_cost_gold (if enabled)
+- direct fees (if craft-level fee exists now or in future)
+
+Craft operational_cost_gold is the sum of all applicable components.
+
+If a craft uses a design BOM, the breakdown MUST indicate it (e.g., materials_source="design_bom").
+If a craft uses explicit materials, indicate materials_source="explicit".

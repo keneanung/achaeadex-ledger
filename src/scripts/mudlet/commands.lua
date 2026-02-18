@@ -86,6 +86,15 @@ local function parse_kv_list(raw)
   return result
 end
 
+local function validate_materials(materials)
+  for commodity, qty in pairs(materials or {}) do
+    if type(qty) ~= "number" or qty <= 0 then
+      return false, "Invalid material qty for " .. tostring(commodity)
+    end
+  end
+  return true
+end
+
 local function parse_flags(tokens, start_index)
   local args = {}
   local flags = {}
@@ -168,6 +177,36 @@ local function get_game_time()
   return game_time
 end
 
+local function resolve_design_id_for_sim(state, design_id)
+  if state.designs and state.designs[design_id] then
+    return design_id
+  end
+  local alias = state.design_aliases and state.design_aliases[design_id] or nil
+  if alias and alias.design_id then
+    return alias.design_id
+  end
+  return design_id
+end
+
+local function compute_op_cost_from_bom(state, design)
+  if not design or not design.bom then
+    return nil
+  end
+
+  local inventory = _G.AchaeadexLedger.Core.Inventory
+  if not inventory then
+    return nil
+  end
+
+  local total = 0
+  for commodity, qty in pairs(design.bom) do
+    local unit_cost = inventory.get_unit_cost(state.inventory, commodity)
+    total = total + (unit_cost * qty)
+  end
+
+  return total + (design.per_item_fee_gold or 0)
+end
+
 local function render_totals(render, totals)
   local fmt = render.format_gold or tostring
   render.kv_block({
@@ -247,15 +286,27 @@ local help_topics = {
   },
   design = {
     title = "Design",
-    purpose = "Create designs, aliases, and costs.",
+    purpose = "Create designs, aliases, costs, and BOM recipes.",
     commands = {
       {
         usage = "adex design start [<design_id>] <type> <name> [--provenance private|public|organization] [--recovery 0|1]",
         example = "adex design start shirt \"Midnight Tunic\" --provenance private"
       },
       {
+        usage = "adex design update <design_id> [--type <type>] [--name <name>] [--provenance private|public|organization] [--recovery 0|1]",
+        example = "adex design update D1 --type shirt --name \"Midnight Tunic\" --provenance private"
+      },
+      {
         usage = "adex design alias add <design_id> <alias_id> <pre_final|final|other> [--active 0|1]",
         example = "adex design alias add D1 9876 final --active 1"
+      },
+      {
+        usage = "adex design bom set <design_id> --materials k=v,...",
+        example = "adex design bom set D1 --materials leather=2"
+      },
+      {
+        usage = "adex design bom show <design_id>",
+        example = "adex design bom show D1"
       },
       {
         usage = "adex design appearance map <design_id> <appearance_key>",
@@ -321,11 +372,11 @@ local help_topics = {
   },
   craft = {
     title = "Craft",
-    purpose = "Record crafted items and resolve design later if needed.",
+    purpose = "Record crafted items with materials, BOM, or manual cost (unknown designs create stubs).",
     commands = {
       {
-        usage = "adex craft [<item_id>] [<design_id>] <operational_cost> [--appearance <appearance_key>] [--design <design_id>] [--time <hours>]",
-        example = "adex craft D1 40 --appearance \"simple black shirt\" --time 0.5"
+        usage = "adex craft [<item_id>] [<design_id>] [<operational_cost>] [--materials k=v,...] [--appearance <appearance_key>] [--design <design_id>] [--time <hours>] [--cost <gold>]",
+        example = "adex craft D1 --materials leather=2 --appearance \"simple black shirt\""
       },
       {
         usage = "adex craft resolve <item_id> <design_id>",
@@ -405,7 +456,7 @@ local help_topics = {
   },
   sim = {
     title = "Sim",
-    purpose = "Simulator for price/units needed to recover capital.",
+    purpose = "Simulator for price/units needed to recover capital (uses BOM + fee when available).",
     commands = {
       {
         usage = "adex sim price <design_id> <price> [--op-cost <gold>]",
@@ -747,6 +798,33 @@ function commands.handle(input)
     return
   end
 
+  if cmd == "design" and tokens[2] == "update" then
+    local design_id = tokens[3]
+    local args, flags = parse_flags(tokens, 4)
+    if not design_id then
+      error_out("usage: adex design update <design_id> [--type <type>] [--name <name>] [--provenance private|public|organization] [--recovery 0|1]")
+      return
+    end
+
+    local design_type = flags.type
+    local name = flags.name
+    local provenance = flags.provenance
+    local recovery = flags.recovery and tonumber(flags.recovery) or nil
+    if recovery ~= nil and recovery ~= 0 and recovery ~= 1 then
+      error_out("usage: adex design update <design_id> [--type <type>] [--name <name>] [--provenance private|public|organization] [--recovery 0|1]")
+      return
+    end
+
+    ledger.apply_design_update(state, design_id, {
+      design_type = design_type,
+      name = name,
+      provenance = provenance,
+      recovery_enabled = recovery
+    })
+    out("OK")
+    return
+  end
+
   if cmd == "design" and tokens[2] == "alias" and tokens[3] == "add" then
     local design_id = tokens[4]
     local alias_id = tokens[5]
@@ -773,6 +851,64 @@ function commands.handle(input)
     end
     ledger.apply_design_appearance(state, design_id, appearance_key, "manual")
     out("OK")
+    return
+  end
+
+  if cmd == "design" and tokens[2] == "bom" and tokens[3] == "set" then
+    local design_id = tokens[4]
+    local args, flags = parse_flags(tokens, 5)
+    local materials = parse_kv_list(flags.materials)
+    if not design_id or not flags.materials then
+      error_out("usage: adex design bom set <design_id> --materials k=v,...")
+      return
+    end
+    local ok, err = validate_materials(materials)
+    if not ok then
+      error_out(err)
+      return
+    end
+    ledger.apply_design_set_bom(state, design_id, materials)
+    out("OK")
+    return
+  end
+
+  if cmd == "design" and tokens[2] == "bom" and tokens[3] == "show" then
+    local design_id = tokens[4]
+    if not design_id then
+      error_out("usage: adex design bom show <design_id>")
+      return
+    end
+    local design = state.designs[design_id]
+    if not design and state.design_aliases and state.design_aliases[design_id] then
+      local resolved = state.design_aliases[design_id].design_id
+      design = state.designs[resolved]
+      design_id = resolved
+    end
+    if not design then
+      error_out("design not found")
+      return
+    end
+    render.section("Design BOM")
+    render.kv_block({
+      { label = "Design", value = design_id }
+    })
+    local rows = {}
+    if design.bom then
+      for commodity, qty in pairs(design.bom) do
+        table.insert(rows, { commodity = commodity, qty = tostring(qty) })
+      end
+    end
+    table.sort(rows, function(a, b)
+      return a.commodity < b.commodity
+    end)
+    if #rows > 0 then
+      render.table(rows, {
+        { key = "commodity", label = "Commodity", nowrap = true, min = 12 },
+        { key = "qty", label = "Qty", align = "right", min = 4 }
+      })
+    else
+      render.print("(no BOM set)")
+    end
     return
   end
 
@@ -963,14 +1099,30 @@ function commands.handle(input)
     local args, flags = parse_flags(tokens, 2)
     local item_id = nil
     local design_id = flags.design
-    local operational_cost = tonumber(args[#args])
-    if #args == 3 then
-      item_id = args[1]
-      design_id = args[2]
-    elseif #args == 2 then
-      item_id = args[1]
-    elseif #args == 1 then
-      item_id = nil
+    local manual_cost = flags.cost and tonumber(flags.cost) or nil
+    local parts = {}
+    for _, value in ipairs(args) do
+      table.insert(parts, value)
+    end
+
+    local tail_cost = nil
+    if #parts > 0 then
+      local maybe_cost = tonumber(parts[#parts])
+      if maybe_cost ~= nil then
+        tail_cost = maybe_cost
+        table.remove(parts, #parts)
+      end
+    end
+
+    if manual_cost == nil then
+      manual_cost = tail_cost
+    end
+
+    if #parts == 2 then
+      item_id = parts[1]
+      design_id = parts[2]
+    elseif #parts == 1 then
+      item_id = parts[1]
     end
     local appearance_key = flags.appearance
     local time_hours = 0
@@ -982,9 +1134,22 @@ function commands.handle(input)
       end
     end
 
-    if operational_cost == nil then
-      error_out("usage: adex craft [<item_id>] [<design_id>] <operational_cost> [--appearance <appearance_key>] [--design <design_id>] [--time <hours>]")
-      return
+    local materials = nil
+    if flags.materials then
+      materials = parse_kv_list(flags.materials)
+      local ok, err = validate_materials(materials)
+      if not ok then
+        error_out(err)
+        return
+      end
+    end
+
+    if not materials and manual_cost == nil then
+      local design = design_id and state.designs[design_id] or nil
+      if not (design and design.bom) then
+        error_out("usage: adex craft [<item_id>] [<design_id>] [<operational_cost>] [--materials k=v,...] [--appearance <appearance_key>] [--design <design_id>] [--time <hours>] [--cost <gold>]")
+        return
+      end
     end
 
     if not item_id then
@@ -994,20 +1159,19 @@ function commands.handle(input)
       out("created_id: " .. tostring(item_id))
     end
 
-    local design = design_id and state.designs[design_id] or nil
-    local per_item_fee = design and (design.per_item_fee_gold or 0) or 0
     local time_cost_per_hour = config.get_time_cost_per_hour and config.get_time_cost_per_hour() or (tonumber(config.get("time_cost_per_hour")) or 0)
     local time_cost = math.floor(time_hours * time_cost_per_hour)
-    local operational_cost_gold = operational_cost + per_item_fee + time_cost
-    local breakdown = {
-      base_cost = operational_cost,
-      per_item_fee = per_item_fee,
-      time_hours = time_hours,
-      time_cost_per_hour = time_cost_per_hour,
-      time_cost = time_cost
-    }
+    if manual_cost ~= nil and not materials then
+      render.warning("WARNING: Manual craft cost used; no materials recorded.")
+    end
 
-    ledger.apply_craft_item(state, item_id, design_id, operational_cost_gold, json.encode(breakdown), appearance_key)
+    ledger.apply_craft_item_auto(state, item_id, design_id, {
+      materials = materials,
+      appearance_key = appearance_key,
+      manual_cost = manual_cost,
+      time_cost_gold = time_cost,
+      time_hours = time_hours
+    })
     out("OK")
     return
   end
@@ -1518,18 +1682,22 @@ function commands.handle(input)
       error_out("usage: adex sim price <design_id> <price> [--op-cost <gold>]")
       return
     end
+    local resolved_id = resolve_design_id_for_sim(state, design_id)
+    local design = state.designs[resolved_id]
+    if not op_cost then
+      op_cost = compute_op_cost_from_bom(state, design)
+    end
     if not op_cost then
       for _, item in pairs(state.crafted_items) do
-        if item.design_id == design_id then
+        if item.design_id == resolved_id then
           op_cost = item.operational_cost_gold
         end
       end
     end
     if not op_cost then
-      error_out("sim price requires --op-cost when no crafted items exist")
+      error_out("sim price requires --op-cost when no BOM or crafted items exist")
       return
     end
-    local design = state.designs[design_id]
     local pattern_remaining = 0
     if design and design.pattern_pool_id and state.pattern_pools[design.pattern_pool_id] then
       pattern_remaining = state.pattern_pools[design.pattern_pool_id].capital_remaining_gold
@@ -1548,18 +1716,22 @@ function commands.handle(input)
       error_out("usage: adex sim units <design_id> <units> [--op-cost <gold>]")
       return
     end
+    local resolved_id = resolve_design_id_for_sim(state, design_id)
+    local design = state.designs[resolved_id]
+    if not op_cost then
+      op_cost = compute_op_cost_from_bom(state, design)
+    end
     if not op_cost then
       for _, item in pairs(state.crafted_items) do
-        if item.design_id == design_id then
+        if item.design_id == resolved_id then
           op_cost = item.operational_cost_gold
         end
       end
     end
     if not op_cost then
-      error_out("sim units requires --op-cost when no crafted items exist")
+      error_out("sim units requires --op-cost when no BOM or crafted items exist")
       return
     end
-    local design = state.designs[design_id]
     local pattern_remaining = 0
     if design and design.pattern_pool_id and state.pattern_pools[design.pattern_pool_id] then
       pattern_remaining = state.pattern_pools[design.pattern_pool_id].capital_remaining_gold

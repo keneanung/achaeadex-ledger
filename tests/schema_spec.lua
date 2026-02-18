@@ -189,6 +189,34 @@ describe("Schema Migration", function()
       db:close()
     end)
   end)
+
+  describe("migration v4", function()
+    it("should add design BOM and crafted materials columns", function()
+      local db = lsqlite3.open_memory()
+      schema.migrate(db, 4)
+
+      local design_columns = {}
+      local stmt = db:prepare("PRAGMA table_info(designs)")
+      for row in stmt:nrows() do
+        design_columns[row.name] = true
+      end
+      stmt:finalize()
+
+      assert.is_true(design_columns.bom_json, "designs.bom_json should exist")
+
+      local crafted_columns = {}
+      stmt = db:prepare("PRAGMA table_info(crafted_items)")
+      for row in stmt:nrows() do
+        crafted_columns[row.name] = true
+      end
+      stmt:finalize()
+
+      assert.is_true(crafted_columns.materials_json, "crafted_items.materials_json should exist")
+      assert.is_true(crafted_columns.materials_source, "crafted_items.materials_source should exist")
+
+      db:close()
+    end)
+  end)
   
   describe("migrate function", function()
     it("should migrate from version 0 to 1", function()
@@ -197,8 +225,8 @@ describe("Schema Migration", function()
       local initial_version = schema.get_version(db)
       assert.are.equal(0, initial_version)
       
-      local final_version = schema.migrate(db, 3)
-      assert.are.equal(3, final_version)
+      local final_version = schema.migrate(db, 4)
+      assert.are.equal(4, final_version)
       
       db:close()
     end)
@@ -230,8 +258,8 @@ describe("Schema Migration", function()
       
       local version = schema.migrate(db)
       
-      -- Should migrate to the latest version (currently 3)
-      assert.are.equal(3, version)
+      -- Should migrate to the latest version (currently 4)
+      assert.are.equal(4, version)
       
       db:close()
     end)

@@ -193,3 +193,57 @@ Expected:
 - lost inputs are removed from inventory
 - no outputs produced
 - fees are accounted as costs of the failed process (no guessing)
+
+------------------------------------------------------------
+TEST 15 – DESIGN BOM USED FOR CRAFT (NO MATERIALS PROVIDED)
+------------------------------------------------------------
+
+Given:
+- Inventory: leather 10 @ 20
+- Design D1 has BOM: { leather: 2 }
+- Craft item I1 from D1 without explicit materials
+Expected:
+- leather decreases by 2
+- I1 materials_cost_gold == 40
+- I1 operational_cost_gold includes materials_cost_gold (+ per-item fee/time if configured)
+- breakdown indicates materials_source="design_bom"
+
+------------------------------------------------------------
+TEST 16 – EXPLICIT MATERIALS OVERRIDE DESIGN BOM
+------------------------------------------------------------
+
+Given:
+- Inventory: leather 10 @ 20, cloth 10 @ 5
+- Design D1 has BOM: { leather: 2 }
+- Craft item I2 from D1 with explicit materials: { cloth: 3 }
+Expected:
+- cloth decreases by 3
+- leather does NOT decrease
+- materials_cost_gold == 15
+- breakdown indicates materials_source="explicit"
+
+------------------------------------------------------------
+TEST 17 – CRAFT WITH UNKNOWN DESIGN CREATES STUB DESIGN WITH BOM
+------------------------------------------------------------
+
+Given:
+- Inventory: cloth 10 @ 5
+- Craft item I3 with design_id="D-UNKNOWN" and explicit materials { cloth: 2 }
+Expected:
+- A stub design "D-UNKNOWN" exists after craft
+- stub design recovery_enabled == 0
+- stub design BOM == { cloth: 2 } (or is settable as default recipe)
+- cloth decreases by 2
+- crafted item linked to the stub design
+
+------------------------------------------------------------
+TEST 18 – ENRICH STUB DESIGN LATER
+------------------------------------------------------------
+
+Given:
+- Stub design exists from prior test
+When:
+- Set stub design type/name/provenance/recovery flag and update BOM
+Expected:
+- Stub becomes a normal design record with updated fields
+- Future crafts from that design use the updated BOM by default
