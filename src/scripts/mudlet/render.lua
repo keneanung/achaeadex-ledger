@@ -36,20 +36,8 @@ local palette = {
   divider = "<blue>"
 }
 
-local function colorize(text, style)
-  if not use_color() or type(cecho) ~= "function" then
-    return text
-  end
-  local tag = palette[style] or ""
-  if tag == "" then
-    return text
-  end
-  return tag .. text .. "<reset>"
-end
-
-local function has_angle(text)
-  local str = tostring(text or "")
-  return str:find("[<>]") ~= nil
+local function can_color()
+  return use_color() and type(cecho) == "function"
 end
 
 local function escape_tags(text)
@@ -57,27 +45,45 @@ local function escape_tags(text)
 end
 
 local function out_line(text, force_plain)
-  if force_plain or not (use_color() and type(cecho) == "function") then
+  local value = tostring(text or "")
+  if force_plain or not can_color() then
     if type(echo) == "function" then
-      echo(text .. "\n")
+      echo(value .. "\n")
     elseif type(print) == "function" then
-      print(text)
+      print(value)
     end
     return
   end
-  cecho(text .. "\n")
+
+  local tag = palette.value or ""
+  if tag ~= "" then
+    cecho(tag)
+  end
+  if type(echo) == "function" then
+    echo(value)
+    cecho("<reset>\n")
+  elseif type(print) == "function" then
+    print(value)
+  end
 end
 
-local function out_line_parts(prefix, suffix)
-  if use_color() and type(cecho) == "function" then
-    cecho(prefix)
-    if type(echo) == "function" then
-      echo(suffix .. "\n")
-    elseif type(print) == "function" then
-      print((prefix or "") .. (suffix or ""))
-    end
-  else
-    out_line((prefix or "") .. (suffix or ""), true)
+local function out_line_colored(text, style)
+  local value = tostring(text or "")
+  if not can_color() then
+    out_line(value, true)
+    return
+  end
+
+  local tag = palette[style] or ""
+  if tag ~= "" then
+    cecho(tag)
+  end
+
+  if type(echo) == "function" then
+    echo(value)
+    cecho("<reset>\n")
+  elseif type(print) == "function" then
+    print(value)
   end
 end
 
@@ -177,8 +183,8 @@ function render.format_gold(n)
 end
 
 function render.section(title)
-  out_line(colorize(title, "header"))
-  out_line(colorize(string.rep("-", get_width()), "divider"))
+  out_line_colored(title, "header")
+  out_line_colored(string.rep("-", get_width()), "divider")
 end
 
 function render.kv_block(rows)
@@ -192,10 +198,15 @@ function render.kv_block(rows)
   for _, row in ipairs(rows) do
     local label = pad_right(tostring(row.label or ""), max_label)
     local value = tostring(row.value or "")
-    if has_angle(value) and use_color() and type(cecho) == "function" then
-      out_line_parts(colorize(label, "label") .. ": ", value)
+
+    if can_color() and type(echo) == "function" then
+      cecho(palette.label)
+      echo(label .. ": ")
+      cecho(palette.value)
+      echo(escape_tags(value))
+      cecho("<reset>\n")
     else
-      out_line(colorize(label, "label") .. ": " .. colorize(escape_tags(value), "value"))
+      out_line(label .. ": " .. escape_tags(value), true)
     end
   end
 end
@@ -209,20 +220,16 @@ function render.table(rows, columns)
     local label = tostring(col.label or col.key or "")
     header_cells[i] = pad_right(label, widths[i])
   end
-  out_line(colorize(table.concat(header_cells, " | "), "label"))
-  out_line(colorize(string.rep("-", width), "divider"))
+  out_line_colored(table.concat(header_cells, " | "), "label")
+  out_line_colored(string.rep("-", width), "divider")
 
   for _, row in ipairs(rows) do
     local cell_lines = {}
     local max_lines = 1
-    local row_plain = false
 
     for i, col in ipairs(columns) do
       local value = row[col.key]
       local text = value == nil and "" or tostring(value)
-      if has_angle(text) then
-        row_plain = true
-      end
       if not col.raw then
         text = escape_tags(text)
       end
@@ -248,24 +255,24 @@ function render.table(rows, columns)
           parts[i] = pad_right(line, widths[i])
         end
       end
-      out_line(table.concat(parts, " | "), row_plain)
+      out_line_colored(table.concat(parts, " | "), "value")
     end
   end
 end
 
 function render.warning(text)
   local value = tostring(text or "")
-  out_line(colorize(value, "warning"), has_angle(value))
+  out_line_colored(value, "warning"), has_angle(value)
 end
 
 function render.error(text)
   local value = tostring(text or "")
-  out_line(colorize(value, "error"), has_angle(value))
+  out_line_colored(value, "error"), has_angle(value)
 end
 
 function render.print(text)
   local value = tostring(text or "")
-  out_line(escape_tags(value), has_angle(value))
+  out_line_colored(escape_tags(value), "value")
 end
 
 function render.print_raw(text)
