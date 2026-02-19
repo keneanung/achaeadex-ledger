@@ -375,7 +375,7 @@ local help_topics = {
     purpose = "Record crafted items with materials, BOM, or manual cost (unknown designs create stubs).",
     commands = {
       {
-        usage = "adex craft [<item_id>] [<design_id>] [<operational_cost>] [--materials k=v,...] [--appearance <appearance_key>] [--design <design_id>] [--time <hours>] [--cost <gold>]",
+        usage = "adex craft [<item_id>] [--materials k=v,...] [--appearance <appearance_key>] [--design <design_id>] [--time <hours>] [--cost <gold>]",
         example = "adex craft D1 --materials leather=2 --appearance \"simple black shirt\""
       },
       {
@@ -1100,36 +1100,19 @@ function commands.handle(input)
     local item_id = nil
     local design_id = flags.design
     local manual_cost = flags.cost and tonumber(flags.cost) or nil
-    local parts = {}
-    for _, value in ipairs(args) do
-      table.insert(parts, value)
+    if #args > 1 then
+      error_out("usage: adex craft [<item_id>] [--materials k=v,...] [--appearance <appearance_key>] [--design <design_id>] [--time <hours>] [--cost <gold>]")
+      return
     end
-
-    local tail_cost = nil
-    if #parts > 0 then
-      local maybe_cost = tonumber(parts[#parts])
-      if maybe_cost ~= nil then
-        tail_cost = maybe_cost
-        table.remove(parts, #parts)
-      end
-    end
-
-    if manual_cost == nil then
-      manual_cost = tail_cost
-    end
-
-    if #parts == 2 then
-      item_id = parts[1]
-      design_id = parts[2]
-    elseif #parts == 1 then
-      item_id = parts[1]
+    if #args == 1 then
+      item_id = args[1]
     end
     local appearance_key = flags.appearance
     local time_hours = 0
     if flags.time then
       time_hours = tonumber(flags.time)
       if time_hours == nil or time_hours < 0 then
-        error_out("usage: adex craft [<item_id>] [<design_id>] <operational_cost> [--appearance <appearance_key>] [--design <design_id>] [--time <hours>]")
+        error_out("usage: adex craft [<item_id>] [--materials k=v,...] [--appearance <appearance_key>] [--design <design_id>] [--time <hours>] [--cost <gold>]")
         return
       end
     end
@@ -1145,11 +1128,16 @@ function commands.handle(input)
     end
 
     if not materials and manual_cost == nil then
-      local design = design_id and state.designs[design_id] or nil
+      local resolved_design_id = design_id
+      if design_id and state.designs[design_id] == nil and state.design_aliases and state.design_aliases[design_id] then
+        resolved_design_id = state.design_aliases[design_id].design_id
+      end
+      local design = resolved_design_id and state.designs[resolved_design_id] or nil
       if not (design and design.bom) then
-        error_out("usage: adex craft [<item_id>] [<design_id>] [<operational_cost>] [--materials k=v,...] [--appearance <appearance_key>] [--design <design_id>] [--time <hours>] [--cost <gold>]")
+        error_out("design has no BOM; use --materials or --cost")
         return
       end
+      design_id = resolved_design_id
     end
 
     if not item_id then

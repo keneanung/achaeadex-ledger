@@ -254,11 +254,13 @@ function render.table(rows, columns)
 end
 
 function render.warning(text)
-  out_line(colorize(text, "warning"))
+  local value = tostring(text or "")
+  out_line(colorize(value, "warning"), has_angle(value))
 end
 
 function render.error(text)
-  out_line(colorize(text, "error"))
+  local value = tostring(text or "")
+  out_line(colorize(value, "error"), has_angle(value))
 end
 
 function render.print(text)
