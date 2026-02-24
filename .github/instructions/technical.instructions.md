@@ -220,6 +220,7 @@ All of the following user-visible mutations MUST be represented as events in led
 Inventory:
 - OPENING_INVENTORY
 - BROKER_BUY
+- BROKER_SELL
 
 Processes:
 - PROCESS_APPLY
@@ -228,6 +229,7 @@ Processes:
 - PROCESS_ADD_FEE
 - PROCESS_COMPLETE
 - PROCESS_ABORT
+- PROCESS_WRITE_OFF
 
 Patterns:
 - PATTERN_ACTIVATE
@@ -254,6 +256,30 @@ Orders:
 - ORDER_ADD_SALE
 - ORDER_SETTLE
 - ORDER_CLOSE (optional but recommended)
+
+OPENING_INVENTORY supports:
+{
+  commodity,
+  qty,
+  unit_cost
+}
+
+BROKER_BUY supports:
+{
+  commodity,
+  qty,
+  unit_cost
+}
+
+BROKER_SELL supports:
+{
+  commodity,
+  qty,
+  unit_price,
+  cost,
+  revenue,
+  profit
+}
 
 PROCESS_APPLY must support:
 {
@@ -302,6 +328,19 @@ PROCESS_ABORT must support:
     outputs: { commodity: qty }       -- optional partial outputs on failure (if applicable)
   },
   note
+}
+
+DESIGN_START supports:
+{
+  design_id,
+  design_type,
+  name,
+  provenance,
+  recovery_enabled,
+  pattern_pool_id?,
+  status?,
+  bom?,
+  created_at?
 }
 
 DESIGN_REGISTER_ALIAS supports:
