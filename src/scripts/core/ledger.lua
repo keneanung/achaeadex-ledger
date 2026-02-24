@@ -95,6 +95,9 @@ function ledger.new(event_store)
     orders = {}, -- order_id -> order data
     order_sales = {}, -- order_id -> { sale_id = true }
     sale_orders = {}, -- sale_id -> order_id
+    order_items = {}, -- order_id -> { item_id = true }
+    item_orders = {}, -- item_id -> order_id
+    order_settlements = {}, -- settlement_id -> settlement data
   }
 end
 
@@ -117,6 +120,21 @@ function ledger.record_event(state, event_type, payload)
   end
 
   return event
+end
+
+function ledger.record_events(state, events)
+  require_event_store(state)
+  assert(type(events) == "table", "events must be a table")
+
+  if type(state.event_store.append_events_and_apply) == "function" then
+    state.event_store:append_events_and_apply(events)
+  else
+    for _, event in ipairs(events) do
+      event.id = state.event_store:append(event)
+    end
+  end
+
+  return events
 end
 
 -- Simple JSON serialization (minimal implementation)
@@ -240,6 +258,10 @@ function ledger.apply_event(state, event)
     local designs = get_designs()
     local resolved_design_id = resolve_design_id(state, payload.design_id)
     designs.set_bom(state, resolved_design_id, payload.bom)
+  elseif event_type == "DESIGN_SET_PRICING" then
+    local designs = get_designs()
+    local resolved_design_id = resolve_design_id(state, payload.design_id)
+    designs.set_pricing_policy(state, resolved_design_id, payload.pricing_policy)
   elseif event_type == "DESIGN_UPDATE" then
     local designs = get_designs()
     local resolved_design_id = resolve_design_id(state, payload.design_id)
@@ -288,6 +310,18 @@ function ledger.apply_event(state, event)
     state.order_sales[payload.order_id] = state.order_sales[payload.order_id] or {}
     state.order_sales[payload.order_id][payload.sale_id] = true
     state.sale_orders[payload.sale_id] = payload.order_id
+  elseif event_type == "ORDER_ADD_ITEM" then
+    state.order_items[payload.order_id] = state.order_items[payload.order_id] or {}
+    state.order_items[payload.order_id][payload.item_id] = true
+    state.item_orders[payload.item_id] = payload.order_id
+  elseif event_type == "ORDER_SETTLE" then
+    state.order_settlements[payload.settlement_id] = {
+      settlement_id = payload.settlement_id,
+      order_id = payload.order_id,
+      amount_gold = payload.amount_gold,
+      method = payload.method,
+      received_at = payload.received_at
+    }
   elseif event_type == "ORDER_CLOSE" then
     local order = state.orders[payload.order_id]
     if not order then
@@ -340,7 +374,8 @@ function ledger.apply_event(state, event)
       item_id = payload.item_id,
       sold_at = payload.sold_at,
       sale_price_gold = payload.sale_price_gold,
-      game_time = payload.game_time
+      game_time = payload.game_time,
+      settlement_id = payload.settlement_id
     }
     state.sales[payload.sale_id] = sale
 
@@ -486,6 +521,18 @@ function ledger.apply_design_set_bom(state, design_id, bom)
   local event = ledger.record_event(state, "DESIGN_SET_BOM", {
     design_id = resolved_design_id,
     bom = bom
+  })
+
+  ledger.apply_event(state, event)
+
+  return state
+end
+
+function ledger.apply_design_set_pricing(state, design_id, pricing_policy)
+  local resolved_design_id = resolve_design_id(state, design_id)
+  local event = ledger.record_event(state, "DESIGN_SET_PRICING", {
+    design_id = resolved_design_id,
+    pricing_policy = pricing_policy
   })
 
   ledger.apply_event(state, event)
@@ -793,6 +840,151 @@ function ledger.apply_order_add_sale(state, order_id, sale_id)
   })
 
   ledger.apply_event(state, event)
+
+  return state
+end
+
+function ledger.apply_order_add_item(state, order_id, item_id)
+  local order = state.orders[order_id]
+  if not order then
+    error("Order " .. order_id .. " not found")
+  end
+
+  if not state.crafted_items[item_id] then
+    error("Item " .. item_id .. " not found")
+  end
+
+  local existing_order = state.item_orders[item_id]
+  if existing_order then
+    error("Item " .. item_id .. " already linked to order " .. existing_order)
+  end
+
+  local event = ledger.record_event(state, "ORDER_ADD_ITEM", {
+    order_id = order_id,
+    item_id = item_id
+  })
+
+  ledger.apply_event(state, event)
+
+  return state
+end
+
+local function allocate_cost_weighted(items, total_amount)
+  local total_cost = 0
+  for _, item in ipairs(items) do
+    total_cost = total_cost + item.cost
+  end
+  if total_cost <= 0 then
+    error("Total cost must be positive for settlement allocation")
+  end
+
+  local allocations = {}
+  local allocated_sum = 0
+  for i = 1, #items do
+    local item = items[i]
+    if i < #items then
+      local alloc = math.floor(total_amount * item.cost / total_cost)
+      table.insert(allocations, {
+        item_id = item.item_id,
+        amount = alloc
+      })
+      allocated_sum = allocated_sum + alloc
+    else
+      table.insert(allocations, {
+        item_id = item.item_id,
+        amount = total_amount - allocated_sum
+      })
+    end
+  end
+
+  return allocations
+end
+
+function ledger.apply_order_settle(state, settlement_id, order_id, amount_gold, method, sale_ids)
+  local order = state.orders[order_id]
+  if not order then
+    error("Order " .. order_id .. " not found")
+  end
+
+  local items = state.order_items[order_id] or {}
+  local item_ids = {}
+  for item_id, _ in pairs(items) do
+    table.insert(item_ids, item_id)
+  end
+  table.sort(item_ids)
+
+  if #item_ids == 0 then
+    error("Order has no items to settle")
+  end
+
+  method = method or "cost_weighted"
+  if method ~= "cost_weighted" then
+    error("Unsupported settlement method: " .. tostring(method))
+  end
+
+  local cost_items = {}
+  for _, item_id in ipairs(item_ids) do
+    local item = state.crafted_items[item_id]
+    if not item then
+      error("Item " .. item_id .. " not found")
+    end
+    for _, sale in pairs(state.sales) do
+      if sale.item_id == item_id then
+        error("Item " .. item_id .. " already sold")
+      end
+    end
+    table.insert(cost_items, { item_id = item_id, cost = item.operational_cost_gold or 0 })
+  end
+
+  local allocations = allocate_cost_weighted(cost_items, amount_gold)
+  local events = {}
+  local ts = os.date("!%Y-%m-%dT%H:%M:%SZ")
+
+  table.insert(events, {
+    event_type = "ORDER_SETTLE",
+    payload = {
+      settlement_id = settlement_id,
+      order_id = order_id,
+      amount_gold = amount_gold,
+      method = method,
+      received_at = ts
+    },
+    ts = ts
+  })
+
+  for index, alloc in ipairs(allocations) do
+    local sale_id = sale_ids and sale_ids[index]
+    if not sale_id then
+      error("Missing sale id for settlement allocation")
+    end
+
+    table.insert(events, {
+      event_type = "SELL_ITEM",
+      payload = {
+        sale_id = sale_id,
+        item_id = alloc.item_id,
+        sale_price_gold = alloc.amount,
+        sold_at = ts,
+        game_time = nil,
+        settlement_id = settlement_id
+      },
+      ts = ts
+    })
+
+    table.insert(events, {
+      event_type = "ORDER_ADD_SALE",
+      payload = {
+        order_id = order_id,
+        sale_id = sale_id
+      },
+      ts = ts
+    })
+  end
+
+  ledger.record_events(state, events)
+  for _, event in ipairs(events) do
+    ledger.apply_event(state, event)
+  end
 
   return state
 end

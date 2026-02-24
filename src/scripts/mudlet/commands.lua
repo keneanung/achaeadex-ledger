@@ -43,6 +43,10 @@ local function get_state()
   return state
 end
 
+local function get_pricing()
+  return _G.AchaeadexLedger.Core.Pricing
+end
+
 local function tokenize(input)
   local tokens = {}
   local i = 1
@@ -309,6 +313,10 @@ local help_topics = {
         example = "adex design bom show D1"
       },
       {
+        usage = "adex design pricing set <design_id> [--round <gold>] [--low-markup <pct>] [--low-min <gold>] [--low-max <gold>] [--mid-markup <pct>] [--mid-min <gold>] [--mid-max <gold>] [--high-markup <pct>] [--high-min <gold>] [--high-max <gold>]",
+        example = "adex design pricing set D1 --round 50 --mid-markup 0.9 --mid-min 400 --mid-max 3000"
+      },
+      {
         usage = "adex design appearance map <design_id> <appearance_key>",
         example = "adex design appearance map D1 \"simple black shirt\""
       },
@@ -324,11 +332,19 @@ local help_topics = {
   },
   order = {
     title = "Order",
-    purpose = "Group sales into orders.",
+    purpose = "Group items and sales into orders.",
     commands = {
       {
         usage = "adex order create [<order_id>] [--customer <name>] [--note <text>]",
         example = "adex order create --customer \"Ada\""
+      },
+      {
+        usage = "adex order add-item <order_id> <item_id>",
+        example = "adex order add-item O-20260215-0001 I-20260215-0001"
+      },
+      {
+        usage = "adex order settle <order_id> <amount_gold> [--method cost_weighted]",
+        example = "adex order settle O-20260215-0001 9000"
       },
       {
         usage = "adex order add <order_id> <sale_id>",
@@ -417,6 +433,16 @@ local help_topics = {
       {
         usage = "adex report item <item_id>",
         example = "adex report item I-20260215-0001"
+      }
+    }
+  },
+  price = {
+    title = "Price",
+    purpose = "Suggest prices from craft cost basis (advisory only).",
+    commands = {
+      {
+        usage = "adex price suggest <item_id>",
+        example = "adex price suggest I-20260215-0001"
       }
     }
   },
@@ -543,7 +569,7 @@ function commands.help(topic)
     })
 
     render.section("Topics")
-    local order = { "inv", "broker", "pattern", "design", "order", "process", "craft", "sell", "report", "list", "sim", "config", "maintenance" }
+    local order = { "inv", "broker", "pattern", "design", "order", "process", "craft", "sell", "report", "list", "price", "sim", "config", "maintenance" }
     local rows = {}
     for _, topic_name in ipairs(order) do
       local entry = help_topics[topic_name]
@@ -569,7 +595,7 @@ function commands.help(topic)
   out_plain("  operational cost: material WAC + fees + time cost per item")
   out_plain("  true profit: profit after design and pattern capital recovery")
   out_plain("Commands:")
-  local order = { "inv", "broker", "pattern", "design", "order", "process", "craft", "sell", "report", "list", "sim", "config", "maintenance" }
+  local order = { "inv", "broker", "pattern", "design", "order", "process", "craft", "sell", "report", "list", "price", "sim", "config", "maintenance" }
   for _, topic_name in ipairs(order) do
     local entry = help_topics[topic_name]
     if entry then
@@ -586,13 +612,14 @@ end
 function commands.handle(input)
   local ledger = _G.AchaeadexLedger.Core.Ledger
   local simulator = _G.AchaeadexLedger.Core.Simulator
+  local pricing = get_pricing()
   local json = _G.AchaeadexLedger.Core.Json
   local id_generator = _G.AchaeadexLedger.Core.IdGenerator
   local listings = _G.AchaeadexLedger.Core.Listings
   local render = _G.AchaeadexLedger.Mudlet.Render
   local config = _G.AchaeadexLedger.Mudlet.Config
 
-  if not ledger or not simulator or not json or not id_generator or not listings or not render or not config then
+  if not ledger or not simulator or not pricing or not json or not id_generator or not listings or not render or not config then
     error_out("core modules not loaded")
     return
   end
@@ -937,6 +964,60 @@ function commands.handle(input)
     return
   end
 
+  if cmd == "design" and tokens[2] == "pricing" and tokens[3] == "set" then
+    local design_id = tokens[4]
+    local args, flags = parse_flags(tokens, 5)
+    if not design_id then
+      error_out("usage: adex design pricing set <design_id> [--round <gold>] [--low-markup <pct>] [--low-min <gold>] [--low-max <gold>] [--mid-markup <pct>] [--mid-min <gold>] [--mid-max <gold>] [--high-markup <pct>] [--high-min <gold>] [--high-max <gold>]")
+      return
+    end
+
+    local policy = pricing.default_policy()
+    if flags.round then
+      local round_to = tonumber(flags.round)
+      if not round_to or round_to <= 0 then
+        error_out("round must be a positive number")
+        return
+      end
+      policy.round_to_gold = math.floor(round_to)
+    end
+
+    local tiers = policy.tiers
+    if flags["low-markup"] then
+      tiers.low.markup_percent = tonumber(flags["low-markup"]) or tiers.low.markup_percent
+    end
+    if flags["low-min"] then
+      tiers.low.min_profit_gold = tonumber(flags["low-min"]) or tiers.low.min_profit_gold
+    end
+    if flags["low-max"] then
+      tiers.low.max_profit_gold = tonumber(flags["low-max"]) or tiers.low.max_profit_gold
+    end
+
+    if flags["mid-markup"] then
+      tiers.mid.markup_percent = tonumber(flags["mid-markup"]) or tiers.mid.markup_percent
+    end
+    if flags["mid-min"] then
+      tiers.mid.min_profit_gold = tonumber(flags["mid-min"]) or tiers.mid.min_profit_gold
+    end
+    if flags["mid-max"] then
+      tiers.mid.max_profit_gold = tonumber(flags["mid-max"]) or tiers.mid.max_profit_gold
+    end
+
+    if flags["high-markup"] then
+      tiers.high.markup_percent = tonumber(flags["high-markup"]) or tiers.high.markup_percent
+    end
+    if flags["high-min"] then
+      tiers.high.min_profit_gold = tonumber(flags["high-min"]) or tiers.high.min_profit_gold
+    end
+    if flags["high-max"] then
+      tiers.high.max_profit_gold = tonumber(flags["high-max"]) or tiers.high.max_profit_gold
+    end
+
+    ledger.apply_design_set_pricing(state, design_id, policy)
+    out("OK")
+    return
+  end
+
   if cmd == "order" and tokens[2] == "create" then
     local args, flags = parse_flags(tokens, 3)
     local order_id = args[1]
@@ -949,6 +1030,60 @@ function commands.handle(input)
       out("created_id: " .. tostring(order_id))
     end
     ledger.apply_order_create(state, order_id, customer, note)
+    out("OK")
+    return
+  end
+
+  if cmd == "order" and tokens[2] == "add-item" then
+    local order_id = tokens[3]
+    local item_id = tokens[4]
+    if not order_id or not item_id then
+      error_out("usage: adex order add-item <order_id> <item_id>")
+      return
+    end
+    ledger.apply_order_add_item(state, order_id, item_id)
+    out("OK")
+    return
+  end
+
+  if cmd == "order" and tokens[2] == "settle" then
+    local order_id = tokens[3]
+    local amount_gold = tonumber(tokens[4])
+    local args, flags = parse_flags(tokens, 5)
+    local method = flags.method or "cost_weighted"
+    if not order_id or amount_gold == nil then
+      error_out("usage: adex order settle <order_id> <amount_gold> [--method cost_weighted]")
+      return
+    end
+    if method ~= "cost_weighted" then
+      error_out("usage: adex order settle <order_id> <amount_gold> [--method cost_weighted]")
+      return
+    end
+
+    local order_items = state.order_items[order_id] or {}
+    local item_ids = {}
+    for item_id, _ in pairs(order_items) do
+      table.insert(item_ids, item_id)
+    end
+    table.sort(item_ids)
+    if #item_ids == 0 then
+      error_out("order has no items")
+      return
+    end
+
+    local settlement_id = id_generator.generate("ST", function(id)
+      return state.order_settlements[id] ~= nil
+    end)
+    out("created_id: " .. tostring(settlement_id))
+
+    local sale_ids = {}
+    for i = 1, #item_ids do
+      sale_ids[i] = id_generator.generate("S", function(id)
+        return state.sales[id] ~= nil
+      end)
+    end
+
+    ledger.apply_order_settle(state, settlement_id, order_id, amount_gold, method, sale_ids)
     out("OK")
     return
   end
@@ -1658,6 +1793,46 @@ function commands.handle(input)
     end
 
     render_warnings(render, report.warnings)
+    return
+  end
+
+  if cmd == "price" and tokens[2] == "suggest" then
+    local item_id = tokens[3]
+    if not item_id then
+      error_out("usage: adex price suggest <item_id>")
+      return
+    end
+
+    local item = state.crafted_items[item_id]
+    if not item then
+      error_out("item not found")
+      return
+    end
+
+    local design = item.design_id and state.designs[item.design_id] or nil
+    local policy = design and design.pricing_policy or nil
+    local policy_used = policy and "design" or "default"
+    local result = pricing.suggest_prices(item.operational_cost_gold, policy)
+
+    render.section("Price Suggest")
+    render.kv_block({
+      { label = "Item", value = item_id },
+      { label = "Design", value = item.design_id or "" },
+      { label = "Policy", value = policy_used }
+    })
+    render.kv_block({
+      { label = "Base cost", value = tostring(result.base_cost_gold) },
+      { label = "Rounded base", value = tostring(result.rounded_base_gold) }
+    })
+
+    render.table({
+      { tier = "low", price = tostring(result.suggested.low) },
+      { tier = "mid", price = tostring(result.suggested.mid) },
+      { tier = "high", price = tostring(result.suggested.high) }
+    }, {
+      { key = "tier", label = "Tier", nowrap = true, min = 4 },
+      { key = "price", label = "Suggested", align = "right", min = 9 }
+    })
     return
   end
 

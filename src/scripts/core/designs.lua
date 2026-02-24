@@ -59,10 +59,24 @@ function designs.create(state, design_id, design_type, name, provenance, recover
     recovery_enabled = recovery_enabled,
     status = status,
     capital_remaining = 0,
-    bom = opts and opts.bom or nil
+    bom = opts and opts.bom or nil,
+    pricing_policy = opts and opts.pricing_policy or nil
   }
 
   state.designs[design_id] = design
+
+  return design
+end
+
+function designs.set_pricing_policy(state, design_id, pricing_policy)
+  ensure_state(state)
+
+  local design = state.designs[design_id]
+  if not design then
+    error("Design " .. design_id .. " not found")
+  end
+
+  design.pricing_policy = pricing_policy
 
   return design
 end

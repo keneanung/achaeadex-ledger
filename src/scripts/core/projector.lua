@@ -164,6 +164,17 @@ function projector.apply(conn, event)
     return
   end
 
+  if event_type == "DESIGN_SET_PRICING" then
+    local json = get_json()
+    local policy_json = payload.pricing_policy and json.encode(payload.pricing_policy) or nil
+    exec_sql(conn, string.format(
+      "UPDATE designs SET pricing_policy_json = %s WHERE design_id = %s",
+      sql_value(policy_json),
+      sql_value(resolve_design_id(conn, payload.design_id))
+    ))
+    return
+  end
+
   if event_type == "DESIGN_UPDATE" then
     exec_sql(conn, string.format(
       "UPDATE designs SET design_type = COALESCE(%s, design_type), name = COALESCE(%s, name), provenance = COALESCE(%s, provenance), recovery_enabled = COALESCE(%s, recovery_enabled), status = COALESCE(%s, status), pattern_pool_id = %s WHERE design_id = %s",
@@ -257,8 +268,8 @@ function projector.apply(conn, event)
     if payload.sale_id then
       local game_time = payload.game_time or {}
       exec_sql(conn, string.format(
-        "INSERT OR REPLACE INTO sales (sale_id, item_id, sold_at, sale_price_gold, game_time_year, game_time_month, game_time_day, game_time_hour, game_time_minute) " ..
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        "INSERT OR REPLACE INTO sales (sale_id, item_id, sold_at, sale_price_gold, game_time_year, game_time_month, game_time_day, game_time_hour, game_time_minute, settlement_id) " ..
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         sql_value(payload.sale_id),
         sql_value(payload.item_id),
         sql_value(payload.sold_at or ts),
@@ -267,7 +278,8 @@ function projector.apply(conn, event)
         sql_value(game_time.month),
         sql_value(game_time.day),
         sql_value(game_time.hour),
-        sql_value(game_time.minute)
+        sql_value(game_time.minute),
+        sql_value(payload.settlement_id)
       ))
 
       local item_row = fetch_one(conn, "SELECT design_id, operational_cost_gold FROM crafted_items WHERE item_id = " .. sql_value(payload.item_id))
@@ -297,11 +309,32 @@ function projector.apply(conn, event)
     return
   end
 
+  if event_type == "ORDER_ADD_ITEM" then
+    exec_sql(conn, string.format(
+      "INSERT OR REPLACE INTO order_items (order_id, item_id) VALUES (%s, %s)",
+      sql_value(payload.order_id),
+      sql_value(payload.item_id)
+    ))
+    return
+  end
+
   if event_type == "ORDER_ADD_SALE" then
     exec_sql(conn, string.format(
       "INSERT OR REPLACE INTO order_sales (order_id, sale_id) VALUES (%s, %s)",
       sql_value(payload.order_id),
       sql_value(payload.sale_id)
+    ))
+    return
+  end
+
+  if event_type == "ORDER_SETTLE" then
+    exec_sql(conn, string.format(
+      "INSERT OR REPLACE INTO order_settlements (settlement_id, order_id, amount_gold, received_at, method) VALUES (%s, %s, %s, %s, %s)",
+      sql_value(payload.settlement_id),
+      sql_value(payload.order_id),
+      sql_value(payload.amount_gold or 0),
+      sql_value(payload.received_at or ts),
+      sql_value(payload.method)
     ))
     return
   end
@@ -367,6 +400,8 @@ end
 
 function projector.truncate_domains(conn)
   local tables = {
+    "order_items",
+    "order_settlements",
     "design_id_aliases",
     "design_appearance_aliases",
     "order_sales",

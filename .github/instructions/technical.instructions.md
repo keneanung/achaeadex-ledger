@@ -99,9 +99,12 @@ designs(
   created_at TEXT NOT NULL,
   pattern_pool_id TEXT,               -- nullable if design not linked or not eligible
   per_item_fee_gold INTEGER NOT NULL DEFAULT 0,
+  bom_json TEXT,                      -- JSON map of standard materials (BOM)
+  pricing_policy_json TEXT,           -- JSON policy override for price suggestions
   provenance TEXT NOT NULL,           -- "private" | "public" | "organization"
   recovery_enabled INTEGER NOT NULL,  -- 1/0; private defaults to 1, public/org default 0
-  status TEXT NOT NULL                -- in_progress/approved/retired etc (flexible)
+  status TEXT NOT NULL,               -- in_progress/approved/retired etc (flexible)
+  capital_remaining_gold INTEGER NOT NULL DEFAULT 0
 )
 
 -- Supports in-game ID changes (draft->final). Multiple aliases may map to one design.
@@ -138,6 +141,8 @@ crafted_items(
   crafted_at TEXT NOT NULL,
   operational_cost_gold INTEGER NOT NULL,
   cost_breakdown_json TEXT NOT NULL,
+  materials_json TEXT,                -- JSON map of materials used at craft
+  materials_source TEXT,              -- "design_bom" | "explicit" | "manual"
   appearance_key TEXT                 -- store the observed appearance string/key for later resolution
 )
 
@@ -145,7 +150,36 @@ sales(
   sale_id TEXT PRIMARY KEY,
   item_id TEXT NOT NULL,
   sold_at TEXT NOT NULL,
-  sale_price_gold INTEGER NOT NULL
+  sale_price_gold INTEGER NOT NULL,
+  settlement_id TEXT                  -- optional link to order_settlements
+)
+
+orders(
+  order_id TEXT PRIMARY KEY,
+  created_at TEXT NOT NULL,
+  customer TEXT,
+  note TEXT,
+  status TEXT NOT NULL
+)
+
+order_sales(
+  order_id TEXT NOT NULL,
+  sale_id TEXT NOT NULL,
+  PRIMARY KEY (order_id, sale_id)
+)
+
+order_items(
+  order_id TEXT NOT NULL,
+  item_id TEXT NOT NULL,
+  PRIMARY KEY (order_id, item_id)
+)
+
+order_settlements(
+  settlement_id TEXT PRIMARY KEY,
+  order_id TEXT NOT NULL,
+  amount_gold INTEGER NOT NULL,
+  received_at TEXT NOT NULL,
+  method TEXT NOT NULL
 )
 
 -- Tracks deferred/in-flight processes so they can be completed later with known outputs.
@@ -170,6 +204,9 @@ Add indexes to keep reads fast:
 - pattern_pools(pattern_type, status)
 - designs(design_type), designs(provenance), designs(recovery_enabled)
 - order_sales(order_id), order_sales(sale_id)
+- order_items(order_id), order_items(item_id)
+- order_settlements(order_id)
+- sales(settlement_id)
 - process_instances(status), process_instances(process_id)
 - design_id_aliases(design_id)
 - design_appearance_aliases(design_id)
@@ -200,6 +237,9 @@ Designs:
 - DESIGN_START (or equivalent creation event)
 - DESIGN_COST
 - DESIGN_SET_PER_ITEM_FEE
+- DESIGN_SET_BOM
+- DESIGN_SET_PRICING
+- DESIGN_UPDATE
 - DESIGN_REGISTER_ALIAS
 - DESIGN_REGISTER_APPEARANCE
 
@@ -210,7 +250,9 @@ Crafting & Sales:
 
 Orders:
 - ORDER_CREATE
+- ORDER_ADD_ITEM
 - ORDER_ADD_SALE
+- ORDER_SETTLE
 - ORDER_CLOSE (optional but recommended)
 
 PROCESS_APPLY must support:
@@ -277,13 +319,39 @@ DESIGN_REGISTER_APPEARANCE supports:
   confidence          -- manual|parsed
 }
 
+DESIGN_SET_BOM supports:
+{
+  design_id,
+  bom                -- { commodity: qty }
+}
+
+DESIGN_SET_PRICING supports:
+{
+  design_id,
+  pricing_policy     -- JSON-serializable policy override
+}
+
+DESIGN_UPDATE supports:
+{
+  design_id,
+  design_type?,
+  name?,
+  provenance?,
+  recovery_enabled?,
+  status?,
+  pattern_pool_id?   -- derived when recovery_enabled=1
+}
+
 CRAFT_ITEM supports:
 {
   item_id,
   design_id (optional),
   appearance_key (optional but recommended),
   operational_cost_gold,
-  breakdown_json
+  breakdown_json,
+  materials (optional),
+  materials_source (optional),
+  materials_cost_gold (optional)
 }
 
 CRAFT_RESOLVE_DESIGN supports:
@@ -291,6 +359,31 @@ CRAFT_RESOLVE_DESIGN supports:
   item_id,
   design_id,
   reason              -- e.g. "manual_map" | "appearance_map"
+}
+
+SELL_ITEM supports:
+{
+  sale_id,
+  item_id,
+  sale_price_gold,
+  sold_at,
+  game_time?,
+  settlement_id?     -- if created from order settlement
+}
+
+ORDER_ADD_ITEM supports:
+{
+  order_id,
+  item_id
+}
+
+ORDER_SETTLE supports:
+{
+  settlement_id,
+  order_id,
+  amount_gold,
+  method,            -- "cost_weighted"
+  received_at
 }
 
 ------------------------------------------------------------
@@ -371,11 +464,18 @@ pattern activate
 pattern deactivate
 
 design start <design_id> <type> <name> [--provenance private|public|organization] [--recovery 0|1]
+design update <design_id> [--type <type>] [--name <name>] [--provenance private|public|organization] [--recovery 0|1]
 design alias add <design_id> <alias_id> <pre_final|final|other> [--active 0|1]
 design appearance map <design_id> <appearance_key>         -- manual mapping
 
+design bom set <design_id> --materials <k=v,...>
+design bom show <design_id>
+
 design cost <design_id> <amount> <kind>
 design set-fee <design_id> <amount>
+design pricing set <design_id> [--round <gold>] [--low-markup <pct>] [--low-min <gold>] [--low-max <gold>]
+                              [--mid-markup <pct>] [--mid-min <gold>] [--mid-max <gold>]
+                              [--high-markup <pct>] [--high-min <gold>] [--high-max <gold>]
 
 -- Immediate process:
 process apply <process_id> --inputs <k=v,...> --outputs <k=v,...> [--fee <gold>] [--note <text>]
@@ -387,14 +487,18 @@ process add-fee <process_instance_id> --fee <gold> [--note <text>]
 process complete <process_instance_id> --outputs <k=v,...> [--note <text>]
 process abort <process_instance_id> --returned <k=v,...> --lost <k=v,...> [--outputs <k=v,...>] [--note <text>]
 
-craft <item_id> [<design_id>] <operational_cost> [--appearance <appearance_key>]
+craft <item_id> [--materials <k=v,...>] [--appearance <appearance_key>] [--design <design_id>] [--time <hours>] [--cost <gold>]
 craft resolve <item_id> <design_id>                         -- binds after the fact (manual)
 
 sell <sale_id> <item_id> <sale_price>
 
+order add-item <order_id> <item_id>
+order settle <order_id> <amount_gold> [--method cost_weighted]
+
 report item <item_id>
 sim price <design_id> <price>
 sim units <design_id> <units>
+price suggest <item_id>
 
 Manual entry only required for MVP.
 Triggers/parsing are optional and must not be required.

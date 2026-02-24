@@ -28,6 +28,10 @@
     "isActive": "yes"
   },
   {
+    "name": "pricing",
+    "isActive": "yes"
+  },
+  {
     "name": "simulator",
     "isActive": "yes"
   },

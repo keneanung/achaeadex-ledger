@@ -18,6 +18,9 @@ You MUST follow the reporting requirements in:
 You MUST follow the UX and discovery requirements in:
 - .github/instructions/ux-and-discovery.instructions.md
 
+You MUST follow the pricing rules in:
+- .github/instructions/pricing.instructions.md
+
 Do not simplify accounting rules.
 Do not change waterfall order.
 Do not replace WAC with FIFO.

@@ -247,3 +247,52 @@ When:
 Expected:
 - Stub becomes a normal design record with updated fields
 - Future crafts from that design use the updated BOM by default
+
+------------------------------------------------------------
+TEST 19 – PRICE SUGGESTION DEFAULTS + ROUNDING
+------------------------------------------------------------
+
+Given:
+- Crafted item I1 has base_cost_gold = 1210
+- Default policy round_to_gold=50
+Expected:
+- rounded_base_gold = 1250
+- low tier:
+  profit_raw = 1250*0.60=750, clamp(min=200,max=1500)=750
+  suggested = 2000 (rounded to 50 already)
+- mid tier:
+  profit_raw = 1125, clamp(min=400,max=3000)=1125
+  suggested = 2375 -> rounded up to 2400
+- high tier:
+  profit_raw = 1500, clamp(min=600,max=6000)=1500
+  suggested = 2750
+
+------------------------------------------------------------
+TEST 20 – PRICE SUGGESTION PROFIT CAP (EXPENSIVE ITEM)
+------------------------------------------------------------
+
+Given:
+- Crafted item I2 has base_cost_gold = 8000
+- Default high tier markup 1.20, cap 6000
+Expected:
+- rounded_base_gold = 8000
+- profit_raw = 9600 -> capped to 6000
+- suggested = 14000 (already multiple of 50)
+
+------------------------------------------------------------
+TEST 21 – LUMP-SUM ORDER SETTLEMENT COST-WEIGHTED ALLOCATION (NO ROUNDING)
+------------------------------------------------------------
+
+Given:
+- Order O1 contains items with operational_cost_gold:
+  I1=1000, I2=2000, I3=3000
+- Settlement amount R=9000
+Expected allocation:
+- total_cost=6000
+- alloc1=floor(9000*1000/6000)=1500
+- alloc2=floor(9000*2000/6000)=3000
+- alloc3=9000-1500-3000=4500
+And:
+- 3 sales are created for I1/I2/I3 with those sale prices
+- Sum allocated == 9000 exactly
+- No rounding-to-50 applied

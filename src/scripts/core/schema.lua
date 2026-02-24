@@ -134,6 +134,32 @@ schema.migrations = {
     ALTER TABLE designs ADD COLUMN bom_json TEXT;
     ALTER TABLE crafted_items ADD COLUMN materials_json TEXT;
     ALTER TABLE crafted_items ADD COLUMN materials_source TEXT;
+  ]],
+  [5] = [[
+    ALTER TABLE designs ADD COLUMN pricing_policy_json TEXT;
+    ALTER TABLE sales ADD COLUMN settlement_id TEXT;
+
+    CREATE TABLE IF NOT EXISTS order_items (
+      order_id TEXT NOT NULL,
+      item_id TEXT NOT NULL,
+      PRIMARY KEY (order_id, item_id),
+      FOREIGN KEY (order_id) REFERENCES orders(order_id),
+      FOREIGN KEY (item_id) REFERENCES crafted_items(item_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS order_settlements (
+      settlement_id TEXT PRIMARY KEY,
+      order_id TEXT NOT NULL,
+      amount_gold INTEGER NOT NULL,
+      received_at TEXT NOT NULL,
+      method TEXT NOT NULL,
+      FOREIGN KEY (order_id) REFERENCES orders(order_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON order_items(order_id);
+    CREATE INDEX IF NOT EXISTS idx_order_items_item_id ON order_items(item_id);
+    CREATE INDEX IF NOT EXISTS idx_order_settlements_order_id ON order_settlements(order_id);
+    CREATE INDEX IF NOT EXISTS idx_sales_settlement_id ON sales(settlement_id);
   ]]
 }
 

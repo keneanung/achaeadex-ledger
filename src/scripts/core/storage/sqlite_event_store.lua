@@ -183,6 +183,51 @@ function sqlite_store:append_event_and_apply(event)
   return event.id
 end
 
+function sqlite_store:append_events_and_apply(events)
+  assert(type(events) == "table", "events must be a table")
+
+  local json = get_json()
+  local projector = get_projector()
+
+  exec_sql(self.conn, "BEGIN")
+
+  local ok, err = pcall(function()
+    for _, event in ipairs(events) do
+      assert(type(event) == "table", "event must be a table")
+      assert(type(event.event_type) == "string", "event_type must be a string")
+
+      local ts = event.ts or os.date("!%Y-%m-%dT%H:%M:%SZ")
+      local payload_json = json.encode(event.payload or {})
+
+      local insert_sql = string.format(
+        "INSERT INTO ledger_events (ts, event_type, payload_json) VALUES ('%s', '%s', '%s')",
+        ts:gsub("'", "''"),
+        event.event_type:gsub("'", "''"),
+        payload_json:gsub("'", "''")
+      )
+
+      exec_sql(self.conn, insert_sql)
+
+      local cur = assert(self.conn:execute("SELECT last_insert_rowid() AS id"))
+      local row = cur:fetch({}, "a")
+      cur:close()
+      event.id = row and tonumber(row.id) or 0
+      event.ts = ts
+
+      projector.apply(self.conn, event)
+    end
+  end)
+
+  if not ok then
+    exec_sql(self.conn, "ROLLBACK")
+    error(err)
+  end
+
+  exec_sql(self.conn, "COMMIT")
+
+  return events
+end
+
 function sqlite_store:read_all()
   local json = get_json()
   local events = {}
@@ -235,7 +280,9 @@ function sqlite_store:domain_counts()
     "crafted_items",
     "sales",
     "orders",
+    "order_items",
     "order_sales",
+    "order_settlements",
     "process_instances"
   }
 

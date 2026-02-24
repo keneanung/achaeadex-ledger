@@ -217,6 +217,49 @@ describe("Schema Migration", function()
       db:close()
     end)
   end)
+
+  describe("migration v5", function()
+    it("should add pricing policy and order settlement tables", function()
+      local db = lsqlite3.open_memory()
+      schema.migrate(db, 5)
+
+      local design_columns = {}
+      local stmt = db:prepare("PRAGMA table_info(designs)")
+      for row in stmt:nrows() do
+        design_columns[row.name] = true
+      end
+      stmt:finalize()
+
+      assert.is_true(design_columns.pricing_policy_json, "designs.pricing_policy_json should exist")
+
+      local sales_columns = {}
+      stmt = db:prepare("PRAGMA table_info(sales)")
+      for row in stmt:nrows() do
+        sales_columns[row.name] = true
+      end
+      stmt:finalize()
+      assert.is_true(sales_columns.settlement_id, "sales.settlement_id should exist")
+
+      local tables = { "order_items", "order_settlements" }
+      for _, table_name in ipairs(tables) do
+        stmt = db:prepare([[
+          SELECT name FROM sqlite_master
+          WHERE type='table' AND name=?
+        ]])
+        stmt:bind_values(table_name)
+        local has_table = false
+        for _ in stmt:nrows() do
+          has_table = true
+          break
+        end
+        stmt:finalize()
+
+        assert.is_true(has_table, "Table " .. table_name .. " should exist")
+      end
+
+      db:close()
+    end)
+  end)
   
   describe("migrate function", function()
     it("should migrate from version 0 to 1", function()
@@ -225,8 +268,8 @@ describe("Schema Migration", function()
       local initial_version = schema.get_version(db)
       assert.are.equal(0, initial_version)
       
-      local final_version = schema.migrate(db, 4)
-      assert.are.equal(4, final_version)
+      local final_version = schema.migrate(db, 5)
+      assert.are.equal(5, final_version)
       
       db:close()
     end)
@@ -258,8 +301,8 @@ describe("Schema Migration", function()
       
       local version = schema.migrate(db)
       
-      -- Should migrate to the latest version (currently 4)
-      assert.are.equal(4, version)
+      -- Should migrate to the latest version (currently 5)
+      assert.are.equal(5, version)
       
       db:close()
     end)

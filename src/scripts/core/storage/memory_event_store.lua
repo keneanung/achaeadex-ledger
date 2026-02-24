@@ -46,6 +46,15 @@ function memory:read_all()
   return results
 end
 
+function memory:append_events_and_apply(events)
+  assert(type(events) == "table", "events must be a table")
+  for _, event in ipairs(events) do
+    local id = self:append(event)
+    event.id = id
+  end
+  return events
+end
+
 _G.AchaeadexLedger.Core.MemoryEventStore = memory
 
 return memory
