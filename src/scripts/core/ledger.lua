@@ -1097,11 +1097,104 @@ function ledger.apply_process_complete(state, process_instance_id, outputs, note
   return ledger.apply_event(state, event)
 end
 
+local function sum_committed_inputs(instance)
+  local totals = {}
+  for _, entry in ipairs(instance.committed_entries or {}) do
+    totals[entry.commodity] = (totals[entry.commodity] or 0) + (entry.qty or 0)
+  end
+  return totals
+end
+
+local function validate_disposition(totals, returned, lost)
+  for commodity, qty in pairs(returned) do
+    if type(qty) ~= "number" or qty < 0 then
+      error("Returned qty must be non-negative for " .. commodity)
+    end
+  end
+  for commodity, qty in pairs(lost) do
+    if type(qty) ~= "number" or qty < 0 then
+      error("Lost qty must be non-negative for " .. commodity)
+    end
+  end
+
+  for commodity, qty in pairs(totals) do
+    local ret = returned[commodity] or 0
+    local los = lost[commodity] or 0
+    if ret + los > qty + 0.0001 then
+      error("Disposition exceeds committed inputs for " .. commodity)
+    end
+  end
+end
+
+local function complete_missing_disposition(totals, returned, lost)
+  local has_returned = next(returned) ~= nil
+  local has_lost = next(lost) ~= nil
+
+  if not has_returned and not has_lost then
+    for commodity, qty in pairs(totals) do
+      lost[commodity] = qty
+    end
+    return returned, lost
+  end
+
+  if has_returned and not has_lost then
+    for commodity, qty in pairs(totals) do
+      local ret = returned[commodity] or 0
+      if ret > qty then
+        error("Returned qty exceeds committed inputs for " .. commodity)
+      end
+      lost[commodity] = qty - ret
+    end
+    return returned, lost
+  end
+
+  if has_lost and not has_returned then
+    for commodity, qty in pairs(totals) do
+      local los = lost[commodity] or 0
+      if los > qty then
+        error("Lost qty exceeds committed inputs for " .. commodity)
+      end
+      returned[commodity] = qty - los
+    end
+    return returned, lost
+  end
+
+  return returned, lost
+end
+
 function ledger.apply_process_abort(state, process_instance_id, disposition, note)
+  local instance = state.process_instances and state.process_instances[process_instance_id]
+  if not instance then
+    error("Process instance not found: " .. process_instance_id)
+  end
+
+  disposition = disposition or {}
+  local returned = disposition.returned or {}
+  local lost = disposition.lost or {}
+  local outputs = disposition.outputs or {}
+
+  local totals = sum_committed_inputs(instance)
+  returned, lost = complete_missing_disposition(totals, returned, lost)
+  validate_disposition(totals, returned, lost)
+
+  if next(returned) ~= nil and next(lost) ~= nil then
+    for commodity, qty in pairs(totals) do
+      local ret = returned[commodity] or 0
+      local los = lost[commodity] or 0
+      if math.abs((ret + los) - qty) > 0.0001 then
+        error("Disposition does not cover all committed inputs for " .. commodity)
+      end
+    end
+  end
+
   local completed_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
   local event = ledger.record_event(state, "PROCESS_ABORT", {
     process_instance_id = process_instance_id,
-    disposition = disposition or {},
+    disposition = {
+      returned = returned,
+      lost = lost,
+      outputs = outputs
+    },
     note = note,
     completed_at = completed_at
   })

@@ -377,12 +377,12 @@ local help_topics = {
         example = "adex process add-fee X-20260215-0001 --fee 4"
       },
       {
-        usage = "adex process complete <process_instance_id> --outputs k=v,... [--note <text>]",
-        example = "adex process complete X-20260215-0001 --outputs metal=3"
+        usage = "adex process complete <process_instance_id> [--outputs k=v,...] [--note <text>]",
+        example = "adex process complete X-20260215-0001"
       },
       {
-        usage = "adex process abort <process_instance_id> --returned k=v,... --lost k=v,... [--outputs k=v,...] [--note <text>]",
-        example = "adex process abort X-20260215-0001 --returned ore=1 --lost ore=4"
+        usage = "adex process abort <process_instance_id> [--returned k=v,...] [--lost k=v,...] [--outputs k=v,...] [--note <text>]",
+        example = "adex process abort X-20260215-0001"
       }
     }
   },
@@ -1187,10 +1187,10 @@ function commands.handle(input)
   if cmd == "process" and tokens[2] == "complete" then
     local process_instance_id = tokens[3]
     local args, flags = parse_flags(tokens, 4)
-    local outputs = parse_kv_list(flags.outputs)
+    local outputs = flags.outputs and parse_kv_list(flags.outputs) or {}
     local note = flags.note
-    if not process_instance_id or not flags.outputs then
-      error_out("usage: adex process complete <process_instance_id> --outputs k=v,... [--note <text>]")
+    if not process_instance_id then
+      error_out("usage: adex process complete <process_instance_id> [--outputs k=v,...] [--note <text>]")
       return
     end
     ledger.apply_process_complete(state, process_instance_id, outputs, note)
@@ -1201,12 +1201,12 @@ function commands.handle(input)
   if cmd == "process" and tokens[2] == "abort" then
     local process_instance_id = tokens[3]
     local args, flags = parse_flags(tokens, 4)
-    local returned = parse_kv_list(flags.returned)
-    local lost = parse_kv_list(flags.lost)
-    local outputs = parse_kv_list(flags.outputs)
+    local returned = flags.returned and parse_kv_list(flags.returned) or {}
+    local lost = flags.lost and parse_kv_list(flags.lost) or {}
+    local outputs = flags.outputs and parse_kv_list(flags.outputs) or {}
     local note = flags.note
-    if not process_instance_id or not flags.returned or not flags.lost then
-      error_out("usage: adex process abort <process_instance_id> --returned k=v,... --lost k=v,... [--outputs k=v,...] [--note <text>]")
+    if not process_instance_id then
+      error_out("usage: adex process abort <process_instance_id> [--returned k=v,...] [--lost k=v,...] [--outputs k=v,...] [--note <text>]")
       return
     end
     ledger.apply_process_abort(state, process_instance_id, {
