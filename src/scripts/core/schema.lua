@@ -160,6 +160,19 @@ schema.migrations = {
     CREATE INDEX IF NOT EXISTS idx_order_items_item_id ON order_items(item_id);
     CREATE INDEX IF NOT EXISTS idx_order_settlements_order_id ON order_settlements(order_id);
     CREATE INDEX IF NOT EXISTS idx_sales_settlement_id ON sales(settlement_id);
+  ]],
+  [6] = [[
+    CREATE TABLE IF NOT EXISTS process_write_offs (
+      write_off_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      process_instance_id TEXT NOT NULL,
+      amount_gold INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      reason TEXT,
+      note TEXT,
+      FOREIGN KEY (process_instance_id) REFERENCES process_instances(process_instance_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_process_write_offs_instance ON process_write_offs(process_instance_id);
   ]]
 }
 

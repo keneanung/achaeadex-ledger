@@ -386,6 +386,8 @@ ORDER_SETTLE supports:
   received_at
 }
 
+- PROCESS_WRITE_OFF { process_instance_id, amount_gold, reason?, note? }
+
 ------------------------------------------------------------
 GENERIC PROCESS SEMANTICS
 ------------------------------------------------------------
@@ -453,6 +455,11 @@ PROJECTOR (APPLY EVENTS TO PROJECTIONS)
    - produce the same domain table state as normal operation
 
 5) Reports and lists should use the domain tables, not recompute everything by replaying events each time.
+
+Projector requirements for PROCESS_WRITE_OFF:
+- Persist the write-off amount so it can be reported (either as an event-only aggregation or a projection table).
+- The projector MUST NOT modify inventory quantities for PROCESS_WRITE_OFF (inventory was already adjusted at commit time).
+- The projector MUST make the write-off visible in profit reports (Overall/Year) as operational expense.
 
 ------------------------------------------------------------
 COMMANDS (MVP)

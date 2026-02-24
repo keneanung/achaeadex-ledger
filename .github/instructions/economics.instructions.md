@@ -105,6 +105,49 @@ DEFERRED PROCESSES (START -> COMPLETE)
    No guessing is allowed.
 
 ------------------------------------------------------------
+PROCESS LOSS RECOGNITION (WRITE-OFF)
+------------------------------------------------------------
+
+Problem:
+- A deferred process may complete (or abort) with no outputs, or with outputs that do not fully account
+  for the committed input+fee basis. This leftover basis must not silently disappear.
+
+Goal:
+- Ensure sunk costs from failed/partial-yield processes are visible in reports as operational expense.
+
+Definitions:
+- committed_basis_gold = sum(committed_input_qty * unit_cost_at_commit_time) + sum(committed_fees_gold)
+- output_basis_gold = total cost basis assigned to outputs produced by the process instance
+- process_loss_gold = committed_basis_gold - output_basis_gold
+
+Rules:
+1) On PROCESS_COMPLETE:
+   - Outputs MAY be empty (no outputs).
+   - Compute committed_basis_gold and output_basis_gold.
+   - If process_loss_gold > 0, record a PROCESS_WRITE_OFF event for that amount.
+
+2) On PROCESS_ABORT:
+   - Returned inputs are restored to inventory (at their committed basis or via deterministic restore rules).
+   - Lost inputs remain sunk.
+   - Outputs MAY be present (optional).
+   - Compute committed_basis_gold and output_basis_gold.
+   - If process_loss_gold > 0, record a PROCESS_WRITE_OFF event for that amount.
+
+3) PROCESS_WRITE_OFF semantics:
+   - Represents an operational expense (loss).
+   - Reduces True Profit in reports.
+   - MUST be attributable to the process_instance_id.
+
+4) Reporting requirements:
+   - Reports that show profit totals MUST include a "Process losses" line item, derived from PROCESS_WRITE_OFF.
+   - This ensures WIP moving to completion does not make value disappear.
+
+5) Accounting invariants:
+   - No floating point. All gold amounts are integers.
+   - WAC rules remain unchanged.
+   - Waterfall recovery remains unchanged.
+   
+------------------------------------------------------------
 PATTERNS
 ------------------------------------------------------------
 

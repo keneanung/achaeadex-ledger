@@ -394,12 +394,25 @@ function projector.apply(conn, event)
     return
   end
 
+  if event_type == "PROCESS_WRITE_OFF" then
+    exec_sql(conn, string.format(
+      "INSERT INTO process_write_offs (process_instance_id, amount_gold, created_at, reason, note) VALUES (%s, %s, %s, %s, %s)",
+      sql_value(payload.process_instance_id),
+      sql_value(payload.amount_gold or 0),
+      sql_value(ts),
+      sql_value(payload.reason),
+      sql_value(payload.note)
+    ))
+    return
+  end
+
   -- Inventory-only events do not map to domain tables.
   return
 end
 
 function projector.truncate_domains(conn)
   local tables = {
+    "process_write_offs",
     "order_items",
     "order_settlements",
     "design_id_aliases",

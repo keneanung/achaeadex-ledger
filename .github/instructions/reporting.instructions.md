@@ -208,6 +208,8 @@ A) Overall report:
   - Inventory value (WAC)
   - In-flight process value (WIP), if applicable
   - Unsold crafted items value, if applicable
+  - Process losses (sum of PROCESS_WRITE_OFF.amount_gold)
+  - True profit MUST be reduced by Process losses.
 
 B) Year report (in-game year):
 - MUST include two holdings sections:
@@ -215,6 +217,8 @@ B) Year report (in-game year):
      - Inventory value (WAC)
      - WIP value (if applicable)
      - Unsold crafted items value (if applicable)
+     - Process losses (sum of PROCESS_WRITE_OFF.amount_gold)
+     - True profit MUST be reduced by Process losses.
   2) Year activity (year-filtered P&L rollups):
      - revenue, costs, applied capital, true profit, etc.
 

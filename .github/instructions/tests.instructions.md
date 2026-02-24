@@ -296,3 +296,39 @@ And:
 - 3 sales are created for I1/I2/I3 with those sale prices
 - Sum allocated == 9000 exactly
 - No rounding-to-50 applied
+
+------------------------------------------------------------
+TEST XX – PROCESS COMPLETE WITH NO OUTPUTS CREATES WRITE-OFF
+------------------------------------------------------------
+
+Given:
+- Inventory: ore 10 @ 10
+- Start deferred process X1 with inputs ore=5 and fee=10
+When:
+- PROCESS_COMPLETE X1 with no outputs (empty outputs)
+Expected:
+- ore decreased by 5 at commit time
+- process instance status becomes completed
+- WIP no longer includes X1
+- A PROCESS_WRITE_OFF event is recorded:
+  - amount_gold == (5*10 + 10) == 60
+- Overall report includes:
+  - Process losses: 60
+  - True profit reduced by 60 (relative to same scenario without the write-off)
+
+------------------------------------------------------------
+TEST XY – PROCESS COMPLETE WITH PARTIAL OUTPUTS CREATES WRITE-OFF FOR REMAINDER
+------------------------------------------------------------
+
+Given:
+- Inventory: ore 10 @ 10
+- Start deferred process X2 with inputs ore=5 and fee=0
+When:
+- PROCESS_COMPLETE X2 with outputs metal=3
+And:
+- Output allocation assigns total_output_basis_gold = 30 (for metal=3)
+Expected:
+- committed_basis_gold == 50
+- output_basis_gold == 30
+- PROCESS_WRITE_OFF.amount_gold == 20
+- Overall report includes Process losses: 20

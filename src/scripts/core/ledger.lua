@@ -98,6 +98,7 @@ function ledger.new(event_store)
     order_items = {}, -- order_id -> { item_id = true }
     item_orders = {}, -- item_id -> order_id
     order_settlements = {}, -- settlement_id -> settlement data
+    process_write_offs = {}, -- list of write-off entries
   }
 end
 
@@ -230,6 +231,15 @@ function ledger.apply_event(state, event)
   elseif event_type == "PROCESS_ABORT" then
     local deferred = get_deferred()
     return deferred.abort(state, payload.process_instance_id, payload.disposition, payload.note, payload.completed_at)
+  elseif event_type == "PROCESS_WRITE_OFF" then
+    state.process_write_offs = state.process_write_offs or {}
+    table.insert(state.process_write_offs, {
+      process_instance_id = payload.process_instance_id,
+      amount_gold = payload.amount_gold or 0,
+      reason = payload.reason,
+      note = payload.note
+    })
+    return state
   elseif event_type == "DESIGN_START" then
     local designs = get_designs()
     local design = designs.create(
@@ -1086,15 +1096,77 @@ function ledger.apply_process_add_fee(state, process_instance_id, gold_fee, note
 end
 
 function ledger.apply_process_complete(state, process_instance_id, outputs, note)
-  local completed_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
-  local event = ledger.record_event(state, "PROCESS_COMPLETE", {
-    process_instance_id = process_instance_id,
-    outputs = outputs or {},
-    note = note,
-    completed_at = completed_at
-  })
+  local instance = state.process_instances and state.process_instances[process_instance_id]
+  if not instance then
+    error("Process instance not found: " .. process_instance_id)
+  end
 
-  return ledger.apply_event(state, event)
+  outputs = outputs or {}
+  local total_output_qty = 0
+  for _, qty in pairs(outputs) do
+    total_output_qty = total_output_qty + qty
+  end
+
+  local committed_basis = (instance.committed_cost_total or 0) + (instance.fees_total or 0)
+  local committed_qty = 0
+  local commodity_count = 0
+  do
+    local totals = {}
+    for _, entry in ipairs(instance.committed_entries or {}) do
+      committed_qty = committed_qty + (entry.qty or 0)
+      totals[entry.commodity] = (totals[entry.commodity] or 0) + (entry.qty or 0)
+    end
+    for _ in pairs(totals) do
+      commodity_count = commodity_count + 1
+    end
+  end
+
+  local output_basis = 0
+  if total_output_qty > 0 and committed_basis > 0 then
+    if commodity_count == 0 or committed_qty <= 0 then
+      output_basis = committed_basis
+    elseif commodity_count > 1 then
+      output_basis = committed_basis
+    elseif committed_qty > 0 then
+      local ratio = total_output_qty / committed_qty
+      if ratio > 1 then
+        ratio = 1
+      end
+      output_basis = committed_basis * ratio
+    end
+  end
+
+  local process_loss = committed_basis - output_basis
+
+  local completed_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+  local events = {
+    {
+      event_type = "PROCESS_COMPLETE",
+      payload = {
+        process_instance_id = process_instance_id,
+        outputs = outputs,
+        note = note,
+        completed_at = completed_at
+      }
+    }
+  }
+
+  if process_loss > 0.0001 then
+    table.insert(events, {
+      event_type = "PROCESS_WRITE_OFF",
+      payload = {
+        process_instance_id = process_instance_id,
+        amount_gold = process_loss
+      }
+    })
+  end
+
+  ledger.record_events(state, events)
+  for _, event in ipairs(events) do
+    ledger.apply_event(state, event)
+  end
+
+  return state
 end
 
 local function sum_committed_inputs(instance)
@@ -1187,19 +1259,75 @@ function ledger.apply_process_abort(state, process_instance_id, disposition, not
     end
   end
 
-  local completed_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
-  local event = ledger.record_event(state, "PROCESS_ABORT", {
-    process_instance_id = process_instance_id,
-    disposition = {
-      returned = returned,
-      lost = lost,
-      outputs = outputs
-    },
-    note = note,
-    completed_at = completed_at
-  })
+  local total_output_qty = 0
+  for _, qty in pairs(outputs) do
+    total_output_qty = total_output_qty + qty
+  end
 
-  return ledger.apply_event(state, event)
+  local committed_basis = (instance.committed_cost_total or 0) + (instance.fees_total or 0)
+  local committed_qty = 0
+  local commodity_count = 0
+  do
+    local totals = {}
+    for _, entry in ipairs(instance.committed_entries or {}) do
+      committed_qty = committed_qty + (entry.qty or 0)
+      totals[entry.commodity] = (totals[entry.commodity] or 0) + (entry.qty or 0)
+    end
+    for _ in pairs(totals) do
+      commodity_count = commodity_count + 1
+    end
+  end
+
+  local output_basis = 0
+  if total_output_qty > 0 and committed_basis > 0 then
+    if commodity_count == 0 or committed_qty <= 0 then
+      output_basis = committed_basis
+    elseif commodity_count > 1 then
+      output_basis = committed_basis
+    elseif committed_qty > 0 then
+      local ratio = total_output_qty / committed_qty
+      if ratio > 1 then
+        ratio = 1
+      end
+      output_basis = committed_basis * ratio
+    end
+  end
+
+  local process_loss = committed_basis - output_basis
+
+  local completed_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+  local events = {
+    {
+      event_type = "PROCESS_ABORT",
+      payload = {
+        process_instance_id = process_instance_id,
+        disposition = {
+          returned = returned,
+          lost = lost,
+          outputs = outputs
+        },
+        note = note,
+        completed_at = completed_at
+      }
+    }
+  }
+
+  if process_loss > 0.0001 then
+    table.insert(events, {
+      event_type = "PROCESS_WRITE_OFF",
+      payload = {
+        process_instance_id = process_instance_id,
+        amount_gold = process_loss
+      }
+    })
+  end
+
+  ledger.record_events(state, events)
+  for _, event in ipairs(events) do
+    ledger.apply_event(state, event)
+  end
+
+  return state
 end
 
 _G.AchaeadexLedger.Core.Ledger = ledger

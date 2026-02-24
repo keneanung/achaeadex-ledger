@@ -219,6 +219,7 @@ local function render_totals(render, totals)
     { label = "Operational profit", value = fmt(totals.operational_profit or 0) },
     { label = "Applied to design capital", value = fmt(totals.applied_to_design_capital or 0) },
     { label = "Applied to pattern capital", value = fmt(totals.applied_to_pattern_capital or 0) },
+    { label = "Process losses", value = fmt(totals.process_losses or 0) },
     { label = "True profit", value = fmt(totals.true_profit or 0) }
   })
 end
@@ -237,6 +238,9 @@ local function render_holdings(render, holdings)
   end
   if holdings.unsold_items_value ~= nil then
     table.insert(rows, { label = "Unsold crafted items value", value = fmt(holdings.unsold_items_value) })
+  end
+  if holdings.process_losses ~= nil then
+    table.insert(rows, { label = "Process losses", value = fmt(holdings.process_losses) })
   end
   if #rows > 0 then
     render.kv_block(rows)

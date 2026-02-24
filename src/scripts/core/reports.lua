@@ -41,6 +41,16 @@ local function sum_design_capital_initial(state, design_id)
   return total
 end
 
+local function sum_process_losses(state)
+  local total = 0
+  for _, event in ipairs(get_events(state)) do
+    if event.event_type == "PROCESS_WRITE_OFF" and event.payload then
+      total = total + (event.payload.amount_gold or 0)
+    end
+  end
+  return total
+end
+
 local function inventory_value(state)
   local ok, result = pcall(function()
     local inventory = get_inventory()
@@ -202,6 +212,7 @@ end
 function reports.overall(state, opts)
   local sales = collect_sales(state)
   local totals = sum_totals(sales)
+  local process_losses = sum_process_losses(state)
 
   local design_remaining = outstanding_design_capital(state)
   local pattern_remaining = outstanding_pattern_capital(state)
@@ -220,6 +231,9 @@ function reports.overall(state, opts)
     table.insert(warnings, "WARNING: Pattern capital remaining > 0")
   end
 
+  totals.process_losses = process_losses
+  totals.true_profit = totals.true_profit - process_losses
+
   return {
     totals = totals,
     sales = sales,
@@ -228,7 +242,8 @@ function reports.overall(state, opts)
     holdings = {
       inventory_value = inventory_total,
       wip_value = wip_total,
-      unsold_items_value = (unsold_count and unsold_count > 0) and unsold_total or nil
+      unsold_items_value = (unsold_count and unsold_count > 0) and unsold_total or nil,
+      process_losses = process_losses
     },
     warnings = warnings
   }
@@ -246,6 +261,7 @@ function reports.year(state, year, opts)
   end)
 
   local totals = sum_totals(sales)
+  local process_losses = sum_process_losses(state)
   local design_remaining = outstanding_design_capital(state)
   local pattern_remaining = outstanding_pattern_capital(state)
 
@@ -266,6 +282,9 @@ function reports.year(state, year, opts)
     table.insert(warnings, "WARNING: Pattern capital remaining > 0")
   end
 
+  totals.process_losses = process_losses
+  totals.true_profit = totals.true_profit - process_losses
+
   return {
     year = year,
     totals = totals,
@@ -273,7 +292,8 @@ function reports.year(state, year, opts)
     holdings = {
       inventory_value = inventory_total,
       wip_value = wip_total,
-      unsold_items_value = (unsold_count and unsold_count > 0) and unsold_total or nil
+      unsold_items_value = (unsold_count and unsold_count > 0) and unsold_total or nil,
+      process_losses = process_losses
     },
     warnings = warnings
   }
