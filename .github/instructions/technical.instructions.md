@@ -151,6 +151,11 @@ sales(
   item_id TEXT NOT NULL,
   sold_at TEXT NOT NULL,
   sale_price_gold INTEGER NOT NULL,
+  game_time_year INTEGER,
+  game_time_month INTEGER,
+  game_time_day INTEGER,
+  game_time_hour INTEGER,
+  game_time_minute INTEGER,
   settlement_id TEXT                  -- optional link to order_settlements
 )
 
@@ -189,6 +194,15 @@ process_instances(
   started_at TEXT NOT NULL,
   completed_at TEXT,
   status TEXT NOT NULL,               -- "in_flight" | "completed" | "aborted"
+  note TEXT
+)
+
+process_write_offs(
+  write_off_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  process_instance_id TEXT NOT NULL,
+  amount_gold INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  reason TEXT,
   note TEXT
 )
 
