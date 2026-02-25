@@ -31,24 +31,70 @@ local function has_opening_inventory(state)
   return false
 end
 
-local function sum_design_capital_initial(state, design_id)
+local function sum_design_capital_initial(state, source_id)
   local total = 0
   for _, event in ipairs(get_events(state)) do
-    if event.event_type == "DESIGN_COST" and event.payload and event.payload.design_id == design_id then
-      total = total + (event.payload.amount or 0)
+    if event.event_type == "DESIGN_COST" and event.payload then
+      local payload_id = event.payload.source_id or event.payload.design_id
+      if payload_id == source_id then
+        total = total + (event.payload.amount or 0)
+      end
     end
   end
   return total
 end
 
+local function get_source_for_item(state, item)
+  if not item then
+    return nil
+  end
+
+  local source_id = item.source_id
+  if not source_id then
+    return nil
+  end
+
+  return state.production_sources and state.production_sources[source_id] or nil
+end
+
 local function sum_process_losses(state)
   local total = 0
   for _, event in ipairs(get_events(state)) do
-    if event.event_type == "PROCESS_WRITE_OFF" and event.payload then
+    if (event.event_type == "PROCESS_WRITE_OFF" or event.event_type == "FORGE_WRITE_OFF") and event.payload then
       total = total + (event.payload.amount_gold or 0)
     end
   end
   return total
+end
+
+local function unallocated_forge_session_costs(state)
+  local total = 0
+  local in_flight_count = 0
+  for _, session in pairs(state.forge_sessions or {}) do
+    if session.status == "in_flight" then
+      in_flight_count = in_flight_count + 1
+      local allocated = 0
+      local attached = state.forge_session_items and state.forge_session_items[session.forge_session_id] or {}
+      for _, amount in pairs(attached or {}) do
+        allocated = allocated + (amount or 0)
+      end
+      local remainder = (session.coal_basis_gold or 0) - allocated
+      if remainder > 0 then
+        total = total + remainder
+      end
+    end
+  end
+  return total, in_flight_count
+end
+
+local function pending_forge_item_count(state)
+  local count = 0
+  for _, item in pairs(state.crafted_items or {}) do
+    if item.pending_forge_session_id then
+      count = count + 1
+    end
+  end
+  return count
 end
 
 local function inventory_value(state)
@@ -87,7 +133,7 @@ local function wip_value(state)
   return total
 end
 
-local function unsold_items_value(state, design_id)
+local function unsold_items_value(state, source_id)
   local sold_items = {}
   for _, sale in pairs(state.sales or {}) do
     sold_items[sale.item_id] = true
@@ -97,7 +143,7 @@ local function unsold_items_value(state, design_id)
   local count = 0
   for _, item in pairs(state.crafted_items or {}) do
     if not sold_items[item.item_id] then
-      if not design_id or item.design_id == design_id then
+      if not source_id or item.source_id == source_id then
         total = total + (item.operational_cost_gold or 0)
         count = count + 1
       end
@@ -128,15 +174,15 @@ local function sale_breakdown(state, sale)
     error("Crafted item " .. tostring(sale.item_id) .. " not found")
   end
 
-  local design = item.design_id and state.designs[item.design_id] or nil
+  local source = get_source_for_item(state, item)
 
   return {
     sale_id = sale.sale_id,
     item_id = sale.item_id,
-    design_id = item.design_id,
+    design_id = item.source_id,
     appearance_key = item.appearance_key,
-    provenance = design and design.provenance or nil,
-    recovery_enabled = design and design.recovery_enabled or nil,
+    provenance = source and source.provenance or nil,
+    recovery_enabled = source and source.recovery_enabled or nil,
     sold_at = sale.sold_at,
     sale_price_gold = sale.sale_price_gold,
     operational_cost_gold = item.operational_cost_gold,
@@ -193,9 +239,9 @@ end
 
 local function outstanding_design_capital(state)
   local total = 0
-  for _, design in pairs(state.designs) do
-    if design.recovery_enabled == 1 then
-      total = total + (design.capital_remaining or 0)
+  for _, source in pairs(state.production_sources) do
+    if source.source_kind == "design" and source.recovery_enabled == 1 then
+      total = total + (source.capital_remaining or 0)
     end
   end
   return total
@@ -223,12 +269,20 @@ function reports.overall(state, opts)
     table.insert(warnings, inventory_warning)
   end
   local wip_total = wip_value(state)
+  local forge_unallocated, forge_in_flight = unallocated_forge_session_costs(state)
   local unsold_total, unsold_count = unsold_items_value(state)
+  local pending_forge_items = pending_forge_item_count(state)
   if design_remaining > 0 then
     table.insert(warnings, "WARNING: Design capital remaining > 0")
   end
   if pattern_remaining > 0 then
     table.insert(warnings, "WARNING: Pattern capital remaining > 0")
+  end
+  if forge_in_flight > 0 then
+    table.insert(warnings, "WARNING: Forge sessions in flight")
+  end
+  if pending_forge_items > 0 then
+    table.insert(warnings, "WARNING: Items with pending forge session allocation")
   end
 
   totals.process_losses = process_losses
@@ -242,6 +296,7 @@ function reports.overall(state, opts)
     holdings = {
       inventory_value = inventory_total,
       wip_value = wip_total,
+      unallocated_forge_session_costs = forge_unallocated > 0 and forge_unallocated or nil,
       unsold_items_value = (unsold_count and unsold_count > 0) and unsold_total or nil,
       process_losses = process_losses
     },
@@ -271,7 +326,9 @@ function reports.year(state, year, opts)
     table.insert(warnings, inventory_warning)
   end
   local wip_total = wip_value(state)
+  local forge_unallocated, forge_in_flight = unallocated_forge_session_costs(state)
   local unsold_total, unsold_count = unsold_items_value(state)
+  local pending_forge_items = pending_forge_item_count(state)
   if unknown_time then
     table.insert(warnings, "WARNING: Some sales have unknown game time and were excluded")
   end
@@ -280,6 +337,12 @@ function reports.year(state, year, opts)
   end
   if pattern_remaining > 0 then
     table.insert(warnings, "WARNING: Pattern capital remaining > 0")
+  end
+  if forge_in_flight > 0 then
+    table.insert(warnings, "WARNING: Forge sessions in flight")
+  end
+  if pending_forge_items > 0 then
+    table.insert(warnings, "WARNING: Items with pending forge session allocation")
   end
 
   totals.process_losses = process_losses
@@ -292,6 +355,7 @@ function reports.year(state, year, opts)
     holdings = {
       inventory_value = inventory_total,
       wip_value = wip_total,
+      unallocated_forge_session_costs = forge_unallocated > 0 and forge_unallocated or nil,
       unsold_items_value = (unsold_count and unsold_count > 0) and unsold_total or nil,
       process_losses = process_losses
     },
@@ -341,8 +405,8 @@ end
 
 function reports.design(state, design_id, opts)
   opts = opts or {}
-  local design = state.designs[design_id]
-  if not design then
+  local source = state.production_sources[design_id]
+  if not source or source.source_kind ~= "design" then
     error("Design " .. design_id .. " not found")
   end
 
@@ -350,7 +414,7 @@ function reports.design(state, design_id, opts)
   local unknown_time = false
   local sales = collect_sales(state, function(sale)
     local item = state.crafted_items[sale.item_id]
-    if not item or item.design_id ~= design_id then
+    if not item or item.source_id ~= design_id then
       return false
     end
     if not year_filter then
@@ -366,7 +430,7 @@ function reports.design(state, design_id, opts)
 
   local crafted_count = 0
   for _, item in pairs(state.crafted_items) do
-    if item.design_id == design_id then
+    if item.source_id == design_id then
       crafted_count = crafted_count + 1
     end
   end
@@ -374,8 +438,8 @@ function reports.design(state, design_id, opts)
   local totals = sum_totals(sales)
 
   local pattern_remaining = nil
-  if design.pattern_pool_id and state.pattern_pools[design.pattern_pool_id] then
-    pattern_remaining = state.pattern_pools[design.pattern_pool_id].capital_remaining_gold
+  if source.pattern_pool_id and state.pattern_pools[source.pattern_pool_id] then
+    pattern_remaining = state.pattern_pools[source.pattern_pool_id].capital_remaining_gold
   end
 
   local warnings = build_base_warnings(state, opts)
@@ -385,9 +449,9 @@ function reports.design(state, design_id, opts)
 
   local unresolved = false
   for _, item in pairs(state.crafted_items) do
-    if not item.design_id and item.appearance_key then
+    if not item.source_id and item.appearance_key then
       local mapping = state.appearance_aliases[item.appearance_key]
-      if mapping and mapping.design_id == design_id then
+      if mapping and mapping.source_id == design_id then
         unresolved = true
         break
       end
@@ -400,15 +464,15 @@ function reports.design(state, design_id, opts)
   local unsold_value = unsold_items_value(state, design_id)
 
   local report = {
-    design_id = design.design_id,
-    name = design.name,
-    design_type = design.design_type,
-    provenance = design.provenance,
-    recovery_enabled = design.recovery_enabled,
-    pattern_pool_id = design.pattern_pool_id,
-    per_item_fee_gold = design.per_item_fee_gold,
-    design_capital_initial = sum_design_capital_initial(state, design.design_id),
-    design_capital_remaining = design.capital_remaining or 0,
+    design_id = source.source_id,
+    name = source.name,
+    design_type = source.source_type,
+    provenance = source.provenance,
+    recovery_enabled = source.recovery_enabled,
+    pattern_pool_id = source.pattern_pool_id,
+    per_item_fee_gold = source.per_item_fee_gold,
+    design_capital_initial = sum_design_capital_initial(state, source.source_id),
+    design_capital_remaining = source.capital_remaining or 0,
     pattern_capital_remaining = pattern_remaining,
     unsold_items_value = unsold_value,
     crafted_count = crafted_count,
@@ -425,7 +489,7 @@ function reports.design(state, design_id, opts)
       local sale = state.sales[sale_id]
       if sale then
         local item = state.crafted_items[sale.item_id]
-        if item and item.design_id == design_id and not seen[order_id] then
+        if item and item.source_id == design_id and not seen[order_id] then
           seen[order_id] = true
           table.insert(order_ids, order_id)
         end

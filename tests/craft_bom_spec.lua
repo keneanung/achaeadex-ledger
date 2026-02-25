@@ -12,7 +12,7 @@ describe("Crafting BOM and materials", function()
     dofile("src/scripts/core/inventory.lua")
     dofile("src/scripts/core/deferred_processes.lua")
     dofile("src/scripts/core/pattern_pools.lua")
-    dofile("src/scripts/core/designs.lua")
+    dofile("src/scripts/core/production_sources.lua")
     dofile("src/scripts/core/recovery.lua")
     dofile("src/scripts/core/ledger.lua")
     dofile("src/scripts/core/storage/memory_event_store.lua")
@@ -81,14 +81,14 @@ describe("Crafting BOM and materials", function()
       time_hours = 0
     })
 
-    local design = state.designs["D-UNKNOWN"]
+    local design = state.production_sources["D-UNKNOWN"]
     assert.is_not_nil(design)
     assert.are.equal(0, design.recovery_enabled)
-    assert.are.equal("unknown", design.design_type)
+    assert.are.equal("unknown", design.source_type)
     assert.are.same({ cloth = 2 }, design.bom)
 
     assert.are.equal(8, inventory.get_qty(state.inventory, "cloth"))
-    assert.are.equal("D-UNKNOWN", state.crafted_items["I3"].design_id)
+    assert.are.equal("D-UNKNOWN", state.crafted_items["I3"].source_id)
   end)
 
   it("TEST 18 - enrich stub design later", function()
@@ -121,10 +121,67 @@ describe("Crafting BOM and materials", function()
     assert.are.equal(8, inventory.get_qty(state.inventory, "leather"))
     assert.are.equal(8, inventory.get_qty(state.inventory, "cloth"))
 
-    local design = state.designs["D-UNKNOWN"]
-    assert.are.equal("shirt", design.design_type)
+    local design = state.production_sources["D-UNKNOWN"]
+    assert.are.equal("shirt", design.source_type)
     assert.are.equal("Updated", design.name)
     assert.are.equal("private", design.provenance)
     assert.are.equal(1, design.recovery_enabled)
+  end)
+
+  it("uses skill source BOM when crafting from source without explicit materials", function()
+    local store = memory_store.new()
+    local state = ledger.new(store)
+
+    ledger.apply_opening_inventory(state, "metal", 10, 12)
+    ledger.apply_source_create(state, "SK-FORGE", "skill", "forging", "Forging", {
+      provenance = "system",
+      status = "active"
+    })
+    ledger.apply_design_set_bom(state, "SK-FORGE", { metal = 3 })
+
+    ledger.apply_source_craft_auto(state, "I-SK1", "SK-FORGE", "skill", {
+      source_type = "forging",
+      time_cost_gold = 0,
+      time_hours = 0
+    })
+
+    assert.are.equal(7, inventory.get_qty(state.inventory, "metal"))
+
+    local item = state.crafted_items["I-SK1"]
+    local breakdown = json.decode(item.cost_breakdown_json)
+    assert.are.equal("SK-FORGE", item.source_id)
+    assert.are.equal("skill", item.source_kind)
+    assert.are.equal("design_bom", breakdown.materials_source)
+    assert.are.equal(36, breakdown.materials_cost_gold)
+    assert.are.equal(36, item.operational_cost_gold)
+  end)
+
+  it("explicit materials override skill source BOM", function()
+    local store = memory_store.new()
+    local state = ledger.new(store)
+
+    ledger.apply_opening_inventory(state, "metal", 10, 12)
+    ledger.apply_opening_inventory(state, "coal", 10, 2)
+    ledger.apply_source_create(state, "SK-FORGE", "skill", "forging", "Forging", {
+      provenance = "system",
+      status = "active"
+    })
+    ledger.apply_design_set_bom(state, "SK-FORGE", { metal = 3 })
+
+    ledger.apply_source_craft_auto(state, "I-SK2", "SK-FORGE", "skill", {
+      source_type = "forging",
+      materials = { coal = 2 },
+      time_cost_gold = 0,
+      time_hours = 0
+    })
+
+    assert.are.equal(10, inventory.get_qty(state.inventory, "metal"))
+    assert.are.equal(8, inventory.get_qty(state.inventory, "coal"))
+
+    local item = state.crafted_items["I-SK2"]
+    local breakdown = json.decode(item.cost_breakdown_json)
+    assert.are.equal("explicit", breakdown.materials_source)
+    assert.are.equal(4, breakdown.materials_cost_gold)
+    assert.are.equal(4, item.operational_cost_gold)
   end)
 end)

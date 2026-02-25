@@ -30,7 +30,7 @@ Strategy:
 Tiers:
 - The system supports three tiers: low / mid / high.
 
-Default global pricing policy (used when no design-level override exists):
+Default global pricing policy (used when no source-level override exists for a design source):
 - round_to_gold = 50
 - tier low:
   - markup_percent = 0.60
@@ -51,22 +51,21 @@ Price formula:
 - suggested_price = rounded_base_gold + profit
 - suggested_price must be rounded UP to the next round_to_gold step.
 
-Design-level override:
-- A design MAY define its own pricing policy.
-- If present, design policy overrides global defaults for that design.
+Source-level override:
+- A design source MAY define its own pricing policy (pricing_policy_json).
+- If present, source policy overrides global defaults for that source.
 
 Craft-time behavior:
 - When a craft is recorded, the system SHOULD be able to show suggested prices (low/mid/high)
   based on that item’s base_cost_gold.
-- The system MAY store suggested prices with the crafted item for convenience
-  (e.g., suggested_price_low/mid/high, suggested_policy_id).
+- The system MAY store suggested prices with the crafted item for convenience.
 
 Commands (MVP):
 - adex price suggest <item_id>
   - prints base_cost_gold, rounded_base_gold and suggested prices for low/mid/high
-  - indicates which policy was used (design override vs default)
+  - indicates which policy was used (source override vs default)
 - adex design pricing set <design_id> [policy fields...]
-  - sets/updates the design pricing policy (optional for MVP; recommended)
+  - sets/updates pricing policy for the design source (design_id == source_id)
 
 ------------------------------------------------------------
 LUMP-SUM ORDER SETTLEMENT (WEIGHTED ALLOCATION)
@@ -98,7 +97,11 @@ Data requirements:
 - Order settlements table: order_settlements(settlement_id, order_id, amount_gold, received_at, method)
 
 Reporting:
-- Order report must show:
-  - settlement amount
-  - allocation method
-  - per-item: item_id, design_id, cost_i, weight, allocated revenue, operational profit, applied-to-capital, true profit
+- Order report must show settlement amount, method, and per-item allocation breakdown.
+
+------------------------------------------------------------
+BACKWARD COMPATIBILITY
+------------------------------------------------------------
+
+- Pricing policies previously stored on designs must be treated as pricing_policy_json on the design source (source_id).
+- The user-facing commands remain "design pricing set", accepting design_id which equals source_id.

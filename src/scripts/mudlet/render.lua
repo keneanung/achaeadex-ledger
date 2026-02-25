@@ -19,6 +19,10 @@ local function get_width()
   return 80
 end
 
+local function get_render_width()
+  return math.max(20, get_width() - 2)
+end
+
 local function use_color()
   local config = get_config()
   if not config then
@@ -196,7 +200,7 @@ end
 
 function render.section(title)
   out_line(tostring(title or ""), "header")
-  out_line(string.rep("-", get_width()), "divider")
+  out_line(string.rep("-", get_render_width()), "divider")
 end
 
 function render.kv_block(rows)
@@ -215,7 +219,7 @@ function render.kv_block(rows)
 end
 
 function render.table(rows, columns)
-  local width = get_width()
+  local width = get_render_width()
   local widths = compute_widths(columns, width)
   local separator = "  "
 

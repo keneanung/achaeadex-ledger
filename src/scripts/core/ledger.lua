@@ -16,14 +16,14 @@ local function get_inventory()
   return _G.AchaeadexLedger.Core.Inventory
 end
 
-local function get_designs()
+local function get_sources()
   if not _G.AchaeadexLedger
     or not _G.AchaeadexLedger.Core
-    or not _G.AchaeadexLedger.Core.Designs then
-    error("AchaeadexLedger.Core.Designs is not loaded")
+    or not _G.AchaeadexLedger.Core.ProductionSources then
+    error("AchaeadexLedger.Core.ProductionSources is not loaded")
   end
 
-  return _G.AchaeadexLedger.Core.Designs
+  return _G.AchaeadexLedger.Core.ProductionSources
 end
 
 local function get_pattern_pools()
@@ -56,23 +56,97 @@ local function get_deferred()
   return _G.AchaeadexLedger.Core.DeferredProcesses
 end
 
+local function get_json()
+  if not _G.AchaeadexLedger
+    or not _G.AchaeadexLedger.Core
+    or not _G.AchaeadexLedger.Core.Json then
+    return nil
+  end
+
+  return _G.AchaeadexLedger.Core.Json
+end
+
 local function require_event_store(state)
   if not state.event_store then
     error("EventStore is required on ledger state")
   end
 end
 
-local function resolve_design_id(state, design_id)
-  if state.designs[design_id] then
-    return design_id
+local function resolve_source_id(state, source_id)
+  if state.production_sources[source_id] then
+    return source_id
   end
 
-  local alias = state.design_aliases[design_id]
-  if alias and alias.design_id then
-    return alias.design_id
+  local alias = state.design_aliases[source_id]
+  if alias and alias.source_id then
+    return alias.source_id
   end
 
-  error("Design " .. design_id .. " not found")
+  error("Design " .. source_id .. " not found")
+end
+
+local function ensure_stub_source(state, source_id, opts)
+  if not source_id then
+    return nil
+  end
+
+  if state.production_sources[source_id] then
+    return source_id
+  end
+
+  local alias = state.design_aliases[source_id]
+  if alias and alias.source_id then
+    if state.production_sources[alias.source_id] then
+      return alias.source_id
+    end
+    source_id = alias.source_id
+  end
+
+  local sources = get_sources()
+  sources.create_design(state, source_id, "unknown", nil, "unknown", 0, {
+    status = "stub",
+    bom = opts and opts.bom or nil
+  })
+
+  return source_id
+end
+
+local function normalize_source_payload(payload)
+  local source_id = payload.source_id or payload.design_id
+  local source_kind = payload.source_kind or "design"
+  return source_id, source_kind
+end
+
+local function decode_breakdown(raw)
+  local json = get_json()
+  if not raw or raw == "" then
+    return {}
+  end
+  if json and type(json.decode) == "function" then
+    local ok, parsed = pcall(json.decode, raw)
+    if ok and type(parsed) == "table" then
+      return parsed
+    end
+  end
+  return {}
+end
+
+local function encode_breakdown(breakdown)
+  local json = get_json()
+  if json and type(json.encode) == "function" then
+    local ok, encoded = pcall(json.encode, breakdown)
+    if ok and type(encoded) == "string" then
+      return encoded
+    end
+  end
+  return "{}"
+end
+
+local function item_base_cost(item)
+  if item.base_operational_cost_gold ~= nil then
+    return item.base_operational_cost_gold
+  end
+  return (item.operational_cost_gold or 0) - (item.forge_allocated_coal_gold or 0)
 end
 
 -- Create a new ledger instance
@@ -84,12 +158,12 @@ function ledger.new(event_store)
   return {
     event_store = event_store,
     inventory = inventory.new(),
-    designs = {}, -- design_id -> design data
+    production_sources = {}, -- source_id -> source data
     pattern_pools = {}, -- pattern_pool_id -> pool data
     pattern_pools_by_type = {}, -- pattern_type -> active pool id
     crafted_items = {}, -- item_id -> item data
-    design_aliases = {}, -- alias_id -> design_id
-    appearance_aliases = {}, -- appearance_key -> design_id
+    design_aliases = {}, -- alias_id -> source_id
+    appearance_aliases = {}, -- appearance_key -> source_id
     process_instances = {}, -- process_instance_id -> process data
     sales = {}, -- sale_id -> sale data
     orders = {}, -- order_id -> order data
@@ -99,6 +173,9 @@ function ledger.new(event_store)
     item_orders = {}, -- item_id -> order_id
     order_settlements = {}, -- settlement_id -> settlement data
     process_write_offs = {}, -- list of write-off entries
+    forge_sessions = {}, -- forge_session_id -> session data
+    forge_session_items = {}, -- forge_session_id -> { item_id -> allocated_coal_gold }
+    item_transformations = {}, -- new_item_id -> transformation link
   }
 end
 
@@ -240,50 +317,80 @@ function ledger.apply_event(state, event)
       note = payload.note
     })
     return state
+  elseif event_type == "FORGE_WRITE_OFF" then
+    state.process_write_offs = state.process_write_offs or {}
+    table.insert(state.process_write_offs, {
+      process_instance_id = payload.forge_session_id,
+      amount_gold = payload.amount_gold or 0,
+      reason = payload.reason or "forge_expire_unused",
+      note = payload.note
+    })
+    return state
+  elseif event_type == "SOURCE_CREATE" then
+    local sources = get_sources()
+    local source_kind = payload.source_kind
+    if source_kind == "skill" then
+      sources.create_skill(state, payload.source_id, payload.source_type, payload.name, payload.provenance, {
+        status = payload.status,
+        created_at = payload.created_at,
+        per_item_fee_gold = payload.per_item_fee_gold
+      })
+    else
+      sources.create_source(state, payload.source_id, source_kind, payload.source_type, payload.name, payload.provenance, payload.recovery_enabled, {
+        status = payload.status,
+        created_at = payload.created_at,
+        per_item_fee_gold = payload.per_item_fee_gold,
+        bom = payload.bom,
+        pricing_policy = payload.pricing_policy,
+        capital_remaining = payload.capital_remaining_gold
+      })
+    end
   elseif event_type == "DESIGN_START" then
-    local designs = get_designs()
-    local design = designs.create(
+    local sources = get_sources()
+    local source_id = payload.source_id or payload.design_id
+    local source_type = payload.source_type or payload.design_type
+    local source = sources.create_design(
       state,
-      payload.design_id,
-      payload.design_type,
+      source_id,
+      source_type,
       payload.name,
       payload.provenance,
       payload.recovery_enabled,
-      { status = payload.status, bom = payload.bom }
+      { status = payload.status, bom = payload.bom, pricing_policy = payload.pricing_policy }
     )
     if payload.pattern_pool_id then
-      design.pattern_pool_id = payload.pattern_pool_id
+      source.pattern_pool_id = payload.pattern_pool_id
     end
     if payload.created_at then
-      design.created_at = payload.created_at
+      source.created_at = payload.created_at
     end
   elseif event_type == "DESIGN_COST" then
-    local designs = get_designs()
-    local resolved_design_id = resolve_design_id(state, payload.design_id)
-    designs.add_capital(state, resolved_design_id, payload.amount)
+    local sources = get_sources()
+    local source_id = resolve_source_id(state, payload.source_id or payload.design_id)
+    sources.add_capital(state, source_id, payload.amount)
   elseif event_type == "DESIGN_SET_PER_ITEM_FEE" then
-    local resolved_design_id = resolve_design_id(state, payload.design_id)
-    state.designs[resolved_design_id].per_item_fee_gold = payload.amount
+    local source_id = resolve_source_id(state, payload.source_id or payload.design_id)
+    state.production_sources[source_id].per_item_fee_gold = payload.amount
   elseif event_type == "DESIGN_SET_BOM" then
-    local designs = get_designs()
-    local resolved_design_id = resolve_design_id(state, payload.design_id)
-    designs.set_bom(state, resolved_design_id, payload.bom)
+    local sources = get_sources()
+    local source_id = resolve_source_id(state, payload.source_id or payload.design_id)
+    sources.set_bom(state, source_id, payload.bom)
   elseif event_type == "DESIGN_SET_PRICING" then
-    local designs = get_designs()
-    local resolved_design_id = resolve_design_id(state, payload.design_id)
-    designs.set_pricing_policy(state, resolved_design_id, payload.pricing_policy)
+    local sources = get_sources()
+    local source_id = resolve_source_id(state, payload.source_id or payload.design_id)
+    sources.set_pricing_policy(state, source_id, payload.pricing_policy)
   elseif event_type == "DESIGN_UPDATE" then
-    local designs = get_designs()
-    local resolved_design_id = resolve_design_id(state, payload.design_id)
-    designs.update(state, resolved_design_id, {
+    local sources = get_sources()
+    local source_id = resolve_source_id(state, payload.source_id or payload.design_id)
+    sources.update(state, source_id, {
       name = payload.name,
-      design_type = payload.design_type,
+      source_type = payload.source_type or payload.design_type,
       provenance = payload.provenance,
       recovery_enabled = payload.recovery_enabled,
       status = payload.status
     })
     if payload.pattern_pool_id ~= nil then
-      state.designs[resolved_design_id].pattern_pool_id = payload.pattern_pool_id
+      state.production_sources[source_id].pattern_pool_id = payload.pattern_pool_id
     end
   elseif event_type == "PATTERN_ACTIVATE" then
     local pattern_pools = get_pattern_pools()
@@ -292,20 +399,20 @@ function ledger.apply_event(state, event)
     local pattern_pools = get_pattern_pools()
     pattern_pools.deactivate(state, payload.pattern_pool_id, payload.deactivated_at)
   elseif event_type == "DESIGN_REGISTER_ALIAS" then
-    local resolved_design_id = resolve_design_id(state, payload.design_id)
+    local source_id = resolve_source_id(state, payload.source_id or payload.design_id)
     state.design_aliases[payload.alias_id] = {
-      design_id = resolved_design_id,
+      source_id = source_id,
       alias_kind = payload.alias_kind,
       active = payload.active
     }
   elseif event_type == "DESIGN_REGISTER_APPEARANCE" then
-    local resolved_design_id = resolve_design_id(state, payload.design_id)
+    local source_id = resolve_source_id(state, payload.source_id or payload.design_id)
     local existing = state.appearance_aliases[payload.appearance_key]
-    if existing and existing.design_id ~= resolved_design_id then
+    if existing and existing.source_id ~= source_id then
       error("Appearance key already mapped to a different design")
     end
     state.appearance_aliases[payload.appearance_key] = {
-      design_id = resolved_design_id,
+      source_id = source_id,
       confidence = payload.confidence
     }
   elseif event_type == "ORDER_CREATE" then
@@ -340,6 +447,12 @@ function ledger.apply_event(state, event)
     order.status = payload.status or order.status
     order.closed_at = payload.closed_at
   elseif event_type == "CRAFT_ITEM" then
+    local source_id, source_kind = normalize_source_payload(payload)
+    local bom = payload.materials
+    if bom and next(bom) == nil then
+      bom = nil
+    end
+    source_id = ensure_stub_source(state, source_id, { bom = bom })
     local inventory = get_inventory()
     local materials = payload.materials or nil
     if materials then
@@ -349,33 +462,40 @@ function ledger.apply_event(state, event)
     end
     state.crafted_items[payload.item_id] = {
       item_id = payload.item_id,
-      design_id = payload.design_id,
+      source_id = source_id,
+      source_kind = source_kind,
       crafted_at = payload.crafted_at,
       operational_cost_gold = payload.operational_cost_gold,
+      base_operational_cost_gold = payload.base_operational_cost_gold or payload.operational_cost_gold,
+      forge_allocated_coal_gold = payload.forge_allocated_coal_gold or 0,
       cost_breakdown_json = payload.cost_breakdown_json,
       appearance_key = payload.appearance_key,
       materials = payload.materials,
       materials_source = payload.materials_source,
-      materials_cost_gold = payload.materials_cost_gold
+      materials_cost_gold = payload.materials_cost_gold,
+      parent_item_id = payload.parent_item_id,
+      transformed = payload.transformed == 1 and 1 or 0
     }
-  elseif event_type == "CRAFT_RESOLVE_DESIGN" then
+  elseif event_type == "CRAFT_RESOLVE_DESIGN" or event_type == "CRAFT_RESOLVE_SOURCE" then
     local item = state.crafted_items[payload.item_id]
     if not item then
       error("Crafted item " .. payload.item_id .. " not found")
     end
-    item.design_id = resolve_design_id(state, payload.design_id)
+    local source_id = ensure_stub_source(state, payload.source_id or payload.design_id)
+    item.source_id = source_id
+    item.source_kind = payload.source_kind or "design"
   elseif event_type == "SELL_ITEM" then
-    if payload.operational_profit ~= nil and payload.design_id then
+    if payload.operational_profit ~= nil and (payload.source_id or payload.design_id) then
       local recovery = get_recovery()
-      local resolved_design_id = resolve_design_id(state, payload.design_id)
-      return recovery.apply_to_state(state, resolved_design_id, payload.operational_profit)
+      local source_id = resolve_source_id(state, payload.source_id or payload.design_id)
+      return recovery.apply_to_state(state, source_id, payload.operational_profit)
     end
 
     local item = state.crafted_items[payload.item_id]
     if not item then
       error("Crafted item " .. payload.item_id .. " not found")
     end
-    if not item.design_id then
+    if not item.source_id then
       error("Crafted item " .. payload.item_id .. " design is unresolved")
     end
 
@@ -390,12 +510,127 @@ function ledger.apply_event(state, event)
     state.sales[payload.sale_id] = sale
 
     local operational_profit = payload.sale_price_gold - item.operational_cost_gold
-    local result = get_recovery().apply_to_state(state, item.design_id, operational_profit)
+    local result = get_recovery().apply_to_state(state, item.source_id, operational_profit)
     sale.operational_profit = result.operational_profit
     sale.applied_to_design_capital = result.applied_to_design_capital
     sale.applied_to_pattern_capital = result.applied_to_pattern_capital
     sale.true_profit = result.true_profit
     return result
+  elseif event_type == "FORGE_FIRE" then
+    local inventory = get_inventory()
+    local coal_basis = payload.coal_basis_gold or 0
+    if payload.coal_cost_explicit ~= 1 then
+      inventory.remove(state.inventory, "coal", 1)
+    end
+    state.forge_sessions[payload.forge_session_id] = {
+      forge_session_id = payload.forge_session_id,
+      source_id = payload.source_id,
+      started_at = payload.started_at,
+      expires_at = payload.expires_at,
+      status = payload.status or "in_flight",
+      coal_basis_gold = coal_basis,
+      allocated_total_gold = payload.allocated_total_gold or 0,
+      note = payload.note
+    }
+    state.forge_session_items[payload.forge_session_id] = state.forge_session_items[payload.forge_session_id] or {}
+  elseif event_type == "FORGE_ATTACH_ITEM" then
+    local session = state.forge_sessions[payload.forge_session_id]
+    if not session then
+      error("Forge session " .. tostring(payload.forge_session_id) .. " not found")
+    end
+    local item = state.crafted_items[payload.item_id]
+    if not item then
+      error("Crafted item " .. tostring(payload.item_id) .. " not found")
+    end
+    local source = item.source_id and state.production_sources[item.source_id] or nil
+    if not source or source.source_kind ~= "skill" or source.source_type ~= "forging" then
+      error("Item " .. tostring(payload.item_id) .. " is not a forged skill item")
+    end
+    if session.source_id and item.source_id ~= session.source_id then
+      error("Item source does not match forge session source")
+    end
+    state.forge_session_items[payload.forge_session_id] = state.forge_session_items[payload.forge_session_id] or {}
+    state.forge_session_items[payload.forge_session_id][payload.item_id] = payload.allocated_coal_gold or 0
+    item.pending_forge_session_id = payload.forge_session_id
+  elseif event_type == "FORGE_ALLOCATE" then
+    local session = state.forge_sessions[payload.forge_session_id]
+    if not session then
+      error("Forge session " .. tostring(payload.forge_session_id) .. " not found")
+    end
+    state.forge_session_items[payload.forge_session_id] = state.forge_session_items[payload.forge_session_id] or {}
+    local allocations = payload.allocations or {}
+    local allocated_sum = 0
+    for item_id, amount in pairs(allocations) do
+      local item = state.crafted_items[item_id]
+      if item then
+        local alloc = tonumber(amount) or 0
+        allocated_sum = allocated_sum + alloc
+        item.forge_allocated_coal_gold = (item.forge_allocated_coal_gold or 0) + alloc
+        item.operational_cost_gold = (item.operational_cost_gold or 0) + alloc
+        local breakdown = decode_breakdown(item.cost_breakdown_json)
+        breakdown.base_operational_cost_gold = item_base_cost(item)
+        breakdown.forge_coal_allocated_gold = item.forge_allocated_coal_gold
+        breakdown.forge_session_id = payload.forge_session_id
+        item.cost_breakdown_json = encode_breakdown(breakdown)
+        if item.pending_forge_session_id == payload.forge_session_id then
+          item.pending_forge_session_id = nil
+        end
+        state.forge_session_items[payload.forge_session_id][item_id] = (state.forge_session_items[payload.forge_session_id][item_id] or 0) + alloc
+      end
+    end
+    session.allocated_total_gold = (session.allocated_total_gold or 0) + allocated_sum
+  elseif event_type == "FORGE_CLOSE" or event_type == "FORGE_EXPIRE" then
+    local session = state.forge_sessions[payload.forge_session_id]
+    if not session then
+      error("Forge session " .. tostring(payload.forge_session_id) .. " not found")
+    end
+    session.status = payload.status or (event_type == "FORGE_EXPIRE" and "expired" or "closed")
+    session.closed_at = payload.closed_at
+    if payload.note ~= nil then
+      session.note = payload.note
+    end
+  elseif event_type == "AUGMENT_ITEM" then
+    local inventory = get_inventory()
+    local target_item = state.crafted_items[payload.target_item_id]
+    if not target_item then
+      error("Target item " .. tostring(payload.target_item_id) .. " not found")
+    end
+    local source_id = resolve_source_id(state, payload.source_id)
+    local source = state.production_sources[source_id]
+    if not source or source.source_kind ~= "skill" or source.source_type ~= "augmentation" then
+      error("Augmentation source must be a skill source with type augmentation")
+    end
+
+    local materials = payload.materials or {}
+    for commodity, qty in pairs(materials) do
+      inventory.remove(state.inventory, commodity, qty)
+    end
+
+    target_item.transformed = 1
+
+    state.crafted_items[payload.new_item_id] = {
+      item_id = payload.new_item_id,
+      source_id = source_id,
+      source_kind = "skill",
+      crafted_at = payload.crafted_at,
+      operational_cost_gold = payload.operational_cost_gold,
+      base_operational_cost_gold = payload.operational_cost_gold,
+      forge_allocated_coal_gold = 0,
+      cost_breakdown_json = payload.cost_breakdown_json or "{}",
+      appearance_key = payload.appearance_key,
+      materials = materials,
+      materials_source = payload.materials_source,
+      materials_cost_gold = payload.materials_cost_gold,
+      parent_item_id = payload.target_item_id,
+      transformed = 0
+    }
+
+    state.item_transformations[payload.new_item_id] = {
+      new_item_id = payload.new_item_id,
+      old_item_id = payload.target_item_id,
+      kind = payload.transform_kind or "augmentation",
+      created_at = payload.crafted_at
+    }
   else
     error("Unknown event type: " .. tostring(event_type))
   end
@@ -462,7 +697,7 @@ end
 
 -- Process DESIGN_COST event
 function ledger.apply_design_cost(state, design_id, amount, kind)
-  local resolved_design_id = resolve_design_id(state, design_id)
+  local resolved_design_id = resolve_source_id(state, design_id)
   local event = ledger.record_event(state, "DESIGN_COST", {
     design_id = resolved_design_id,
     amount = amount,
@@ -476,7 +711,6 @@ end
 
 -- Process DESIGN_START event
 function ledger.apply_design_start(state, design_id, design_type, name, provenance, recovery_enabled)
-  local designs = get_designs()
   provenance = provenance or "private"
   if recovery_enabled == nil then
     if provenance == "private" then
@@ -514,7 +748,7 @@ end
 
 -- Process DESIGN_SET_PER_ITEM_FEE event
 function ledger.apply_design_set_fee(state, design_id, amount)
-  local resolved_design_id = resolve_design_id(state, design_id)
+  local resolved_design_id = resolve_source_id(state, design_id)
 
   local event = ledger.record_event(state, "DESIGN_SET_PER_ITEM_FEE", {
     design_id = resolved_design_id,
@@ -527,7 +761,7 @@ function ledger.apply_design_set_fee(state, design_id, amount)
 end
 
 function ledger.apply_design_set_bom(state, design_id, bom)
-  local resolved_design_id = resolve_design_id(state, design_id)
+  local resolved_design_id = resolve_source_id(state, design_id)
   local event = ledger.record_event(state, "DESIGN_SET_BOM", {
     design_id = resolved_design_id,
     bom = bom
@@ -539,7 +773,7 @@ function ledger.apply_design_set_bom(state, design_id, bom)
 end
 
 function ledger.apply_design_set_pricing(state, design_id, pricing_policy)
-  local resolved_design_id = resolve_design_id(state, design_id)
+  local resolved_design_id = resolve_source_id(state, design_id)
   local event = ledger.record_event(state, "DESIGN_SET_PRICING", {
     design_id = resolved_design_id,
     pricing_policy = pricing_policy
@@ -551,16 +785,16 @@ function ledger.apply_design_set_pricing(state, design_id, pricing_policy)
 end
 
 function ledger.apply_design_update(state, design_id, fields)
-  local resolved_design_id = resolve_design_id(state, design_id)
-  local design = state.designs[resolved_design_id]
-  if not design then
+  local resolved_design_id = resolve_source_id(state, design_id)
+  local source = state.production_sources[resolved_design_id]
+  if not source then
     error("Design " .. resolved_design_id .. " not found")
   end
 
-  local target_type = fields.design_type or design.design_type
+  local target_type = fields.design_type or source.source_type
   local target_recovery = fields.recovery_enabled
   if target_recovery == nil then
-    target_recovery = design.recovery_enabled
+    target_recovery = source.recovery_enabled
   end
 
   local pattern_pool_id = nil
@@ -618,7 +852,7 @@ function ledger.apply_pattern_deactivate(state, pattern_pool_id)
 end
 
 function ledger.apply_sell_recovery(state, design_id, operational_profit)
-  local resolved_design_id = resolve_design_id(state, design_id)
+  local resolved_design_id = resolve_source_id(state, design_id)
   local event = ledger.record_event(state, "SELL_ITEM", {
     design_id = resolved_design_id,
     operational_profit = operational_profit
@@ -630,7 +864,7 @@ function ledger.apply_sell_recovery(state, design_id, operational_profit)
 end
 
 function ledger.apply_design_alias(state, design_id, alias_id, alias_kind, active)
-  local resolved_design_id = resolve_design_id(state, design_id)
+  local resolved_design_id = resolve_source_id(state, design_id)
   local event = ledger.record_event(state, "DESIGN_REGISTER_ALIAS", {
     design_id = resolved_design_id,
     alias_id = alias_id,
@@ -644,9 +878,9 @@ function ledger.apply_design_alias(state, design_id, alias_id, alias_kind, activ
 end
 
 function ledger.apply_design_appearance(state, design_id, appearance_key, confidence)
-  local resolved_design_id = resolve_design_id(state, design_id)
+  local resolved_design_id = resolve_source_id(state, design_id)
   local existing = state.appearance_aliases[appearance_key]
-  if existing and existing.design_id ~= resolved_design_id then
+  if existing and existing.source_id ~= resolved_design_id then
     error("Appearance key already mapped to a different design")
   end
   local event = ledger.record_event(state, "DESIGN_REGISTER_APPEARANCE", {
@@ -660,25 +894,25 @@ function ledger.apply_design_appearance(state, design_id, appearance_key, confid
   return state
 end
 
-local function ensure_design_or_stub(state, design_id, bom)
-  if not design_id then
+local function ensure_design_or_stub(state, source_id, bom)
+  if not source_id then
     return nil
   end
 
-  if state.designs[design_id] then
-    return design_id
+  if state.production_sources[source_id] then
+    return source_id
   end
 
-  local alias = state.design_aliases[design_id]
-  if alias and alias.design_id then
-    return alias.design_id
+  local alias = state.design_aliases[source_id]
+  if alias and alias.source_id then
+    return alias.source_id
   end
 
   local event = ledger.record_event(state, "DESIGN_START", {
-    design_id = design_id,
+    design_id = source_id,
     design_type = "unknown",
     name = nil,
-    provenance = "public",
+    provenance = "unknown",
     recovery_enabled = 0,
     status = "stub",
     created_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
@@ -687,10 +921,27 @@ local function ensure_design_or_stub(state, design_id, bom)
   ledger.apply_event(state, event)
 
   if bom then
-    ledger.apply_design_set_bom(state, design_id, bom)
+    ledger.apply_design_set_bom(state, source_id, bom)
   end
 
-  return design_id
+  return source_id
+end
+
+local function ensure_source_or_stub(state, source_id, source_kind, source_type)
+  if source_kind ~= "design" then
+    local source = state.production_sources[source_id]
+    if not source then
+      error("Production source " .. tostring(source_id) .. " not found")
+    end
+    if source.source_kind ~= source_kind then
+      error("Source kind mismatch for " .. tostring(source_id))
+    end
+    if source_type and source.source_type ~= source_type then
+      error("Source type mismatch for " .. tostring(source_id))
+    end
+    return source_id
+  end
+  return ensure_design_or_stub(state, source_id)
 end
 
 local function compute_material_cost(state, materials)
@@ -719,7 +970,7 @@ function ledger.apply_craft_item_auto(state, item_id, design_id, opts)
   local time_hours = opts.time_hours or 0
 
   local resolved_design_id = ensure_design_or_stub(state, design_id, materials)
-  local design = resolved_design_id and state.designs[resolved_design_id] or nil
+  local source = resolved_design_id and state.production_sources[resolved_design_id] or nil
 
   local materials_source = nil
   local materials_cost = 0
@@ -729,10 +980,10 @@ function ledger.apply_craft_item_auto(state, item_id, design_id, opts)
     materials_source = "explicit"
     materials_payload = materials
     materials_cost = compute_material_cost(state, materials)
-  elseif design and design.bom and next(design.bom) ~= nil then
+  elseif source and source.bom and next(source.bom) ~= nil then
     materials_source = "design_bom"
-    materials_payload = design.bom
-    materials_cost = compute_material_cost(state, design.bom)
+    materials_payload = source.bom
+    materials_cost = compute_material_cost(state, source.bom)
   elseif manual_cost ~= nil then
     materials_source = "manual"
     materials_cost = manual_cost
@@ -740,7 +991,7 @@ function ledger.apply_craft_item_auto(state, item_id, design_id, opts)
     error("No materials provided and no design BOM available")
   end
 
-  local per_item_fee = design and (design.per_item_fee_gold or 0) or 0
+  local per_item_fee = source and (source.per_item_fee_gold or 0) or 0
   local operational_cost_gold = materials_cost + per_item_fee + time_cost_gold
 
   local breakdown = {
@@ -749,11 +1000,12 @@ function ledger.apply_craft_item_auto(state, item_id, design_id, opts)
     materials = materials_payload,
     per_item_fee = per_item_fee,
     time_hours = time_hours,
-    time_cost_gold = time_cost_gold
+    time_cost_gold = time_cost_gold,
+    base_operational_cost_gold = operational_cost_gold,
+    forge_coal_allocated_gold = 0
   }
 
-  local json = _G.AchaeadexLedger.Core.Json
-  local breakdown_json = json and json.encode(breakdown) or "{}"
+  local breakdown_json = encode_breakdown(breakdown)
 
   return ledger.apply_craft_item(
     state,
@@ -771,8 +1023,12 @@ end
 function ledger.apply_craft_item(state, item_id, design_id, operational_cost_gold, cost_breakdown_json, appearance_key, materials, materials_source, materials_cost_gold)
   local event = ledger.record_event(state, "CRAFT_ITEM", {
     item_id = item_id,
+    source_id = design_id,
+    source_kind = "design",
     design_id = design_id,
     operational_cost_gold = operational_cost_gold,
+    base_operational_cost_gold = operational_cost_gold,
+    forge_allocated_coal_gold = 0,
     cost_breakdown_json = cost_breakdown_json,
     appearance_key = appearance_key,
     crafted_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
@@ -786,10 +1042,315 @@ function ledger.apply_craft_item(state, item_id, design_id, operational_cost_gol
   return state
 end
 
-function ledger.apply_craft_resolve(state, item_id, design_id, reason)
-  local resolved_design_id = resolve_design_id(state, design_id)
-  local event = ledger.record_event(state, "CRAFT_RESOLVE_DESIGN", {
+function ledger.apply_source_create(state, source_id, source_kind, source_type, name, opts)
+  opts = opts or {}
+  local event = ledger.record_event(state, "SOURCE_CREATE", {
+    source_id = source_id,
+    source_kind = source_kind,
+    source_type = source_type,
+    name = name,
+    provenance = opts.provenance,
+    recovery_enabled = opts.recovery_enabled,
+    status = opts.status,
+    per_item_fee_gold = opts.per_item_fee_gold,
+    created_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+  })
+
+  ledger.apply_event(state, event)
+
+  return state
+end
+
+function ledger.apply_source_craft_auto(state, item_id, source_id, source_kind, opts)
+  opts = opts or {}
+  local resolved_source_id = ensure_source_or_stub(state, source_id, source_kind, opts.source_type)
+  local source = state.production_sources[resolved_source_id]
+
+  local materials = opts.materials
+  local appearance_key = opts.appearance_key
+  local manual_cost = opts.manual_cost
+  local time_cost_gold = opts.time_cost_gold or 0
+  local time_hours = opts.time_hours or 0
+  local materials_source = nil
+  local materials_cost = 0
+  local materials_payload = nil
+
+  if materials and next(materials) ~= nil then
+    materials_source = "explicit"
+    materials_payload = materials
+    materials_cost = compute_material_cost(state, materials)
+  elseif source and source.bom and next(source.bom) ~= nil then
+    materials_source = "design_bom"
+    materials_payload = source.bom
+    materials_cost = compute_material_cost(state, source.bom)
+  elseif manual_cost ~= nil then
+    materials_source = "manual"
+    materials_cost = manual_cost
+  elseif opts.allow_estimated then
+    materials_source = "estimated"
+    materials_cost = 0
+  else
+    error("No materials provided and no source BOM available")
+  end
+
+  local per_item_fee = source and (source.per_item_fee_gold or 0) or 0
+  local operational_cost_gold = materials_cost + per_item_fee + time_cost_gold
+  local breakdown = {
+    materials_cost_gold = materials_cost,
+    materials_source = materials_source,
+    materials = materials_payload,
+    per_item_fee = per_item_fee,
+    time_hours = time_hours,
+    time_cost_gold = time_cost_gold,
+    base_operational_cost_gold = operational_cost_gold,
+    forge_coal_allocated_gold = 0
+  }
+
+  local event = ledger.record_event(state, "CRAFT_ITEM", {
     item_id = item_id,
+    source_id = resolved_source_id,
+    source_kind = source_kind,
+    operational_cost_gold = operational_cost_gold,
+    base_operational_cost_gold = operational_cost_gold,
+    forge_allocated_coal_gold = 0,
+    cost_breakdown_json = encode_breakdown(breakdown),
+    appearance_key = appearance_key,
+    crafted_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    materials = materials_payload,
+    materials_source = materials_source,
+    materials_cost_gold = materials_cost
+  })
+
+  ledger.apply_event(state, event)
+
+  return state
+end
+
+function ledger.apply_forge_fire(state, forge_session_id, source_id, opts)
+  opts = opts or {}
+  local resolved_source_id = ensure_source_or_stub(state, source_id, "skill", "forging")
+  local coal_basis = opts.coal_cost_gold
+  local coal_cost_explicit = 0
+  if coal_basis == nil then
+    local inventory = get_inventory()
+    local coal_qty = inventory.get_qty(state.inventory, "coal")
+    if coal_qty < 1 then
+      error("Insufficient coal: have " .. tostring(coal_qty) .. ", need 1")
+    end
+    coal_basis = inventory.get_unit_cost(state.inventory, "coal")
+  else
+    coal_cost_explicit = 1
+  end
+  local event = ledger.record_event(state, "FORGE_FIRE", {
+    forge_session_id = forge_session_id,
+    source_id = resolved_source_id,
+    coal_basis_gold = coal_basis,
+    coal_cost_explicit = coal_cost_explicit,
+    expires_at = opts.expires_at,
+    status = "in_flight",
+    note = opts.note,
+    started_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+  })
+  ledger.apply_event(state, event)
+  return state
+end
+
+function ledger.apply_forge_attach(state, forge_session_id, item_id)
+  local event = ledger.record_event(state, "FORGE_ATTACH_ITEM", {
+    forge_session_id = forge_session_id,
+    item_id = item_id,
+    allocated_coal_gold = 0
+  })
+  ledger.apply_event(state, event)
+  return state
+end
+
+function ledger.apply_forge_finalize(state, forge_session_id, status, method, note)
+  local session = state.forge_sessions[forge_session_id]
+  if not session then
+    error("Forge session " .. tostring(forge_session_id) .. " not found")
+  end
+  if session.status ~= "in_flight" then
+    error("Forge session " .. tostring(forge_session_id) .. " is not in_flight")
+  end
+
+  method = method or "cost_weighted"
+  if method ~= "cost_weighted" then
+    error("Unsupported forge allocation method: " .. tostring(method))
+  end
+
+  local item_allocs = state.forge_session_items[forge_session_id] or {}
+  local attached_ids = {}
+  for item_id, _ in pairs(item_allocs) do
+    table.insert(attached_ids, item_id)
+  end
+  table.sort(attached_ids)
+
+  local events = {
+    {
+      event_type = status == "expired" and "FORGE_EXPIRE" or "FORGE_CLOSE",
+      payload = {
+        forge_session_id = forge_session_id,
+        status = status,
+        method = method,
+        note = note,
+        closed_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+      }
+    }
+  }
+
+  local coal_total = session.coal_basis_gold or 0
+  if #attached_ids == 0 then
+    if status == "expired" and coal_total > 0 then
+      table.insert(events, {
+        event_type = "FORGE_WRITE_OFF",
+        payload = {
+          forge_session_id = forge_session_id,
+          amount_gold = coal_total,
+          reason = "forge_expire_unused",
+          note = note
+        }
+      })
+    end
+  elseif coal_total > 0 then
+    local weighted = {}
+    local total_base = 0
+    for _, item_id in ipairs(attached_ids) do
+      local item = state.crafted_items[item_id]
+      if not item then
+        error("Crafted item " .. tostring(item_id) .. " not found")
+      end
+      local base = item_base_cost(item)
+      total_base = total_base + base
+      table.insert(weighted, { item_id = item_id, cost = base })
+    end
+
+    local allocations = {}
+    local computed_over = {}
+    local item_breakdowns = {}
+    local allocated_sum = 0
+    if total_base <= 0 then
+      local per = math.floor(coal_total / #weighted)
+      for index, row in ipairs(weighted) do
+        local alloc = (index < #weighted) and per or (coal_total - allocated_sum)
+        allocations[row.item_id] = alloc
+        computed_over[row.item_id] = row.cost
+        local item = state.crafted_items[row.item_id]
+        local breakdown = decode_breakdown(item and item.cost_breakdown_json or "{}")
+        breakdown.base_operational_cost_gold = row.cost
+        breakdown.forge_coal_allocated_gold = (item and item.forge_allocated_coal_gold or 0) + alloc
+        breakdown.forge_session_id = forge_session_id
+        item_breakdowns[row.item_id] = encode_breakdown(breakdown)
+        allocated_sum = allocated_sum + alloc
+      end
+    else
+      for index, row in ipairs(weighted) do
+        local alloc = 0
+        if index < #weighted then
+          alloc = math.floor(coal_total * row.cost / total_base)
+        else
+          alloc = coal_total - allocated_sum
+        end
+        allocations[row.item_id] = alloc
+        computed_over[row.item_id] = row.cost
+        local item = state.crafted_items[row.item_id]
+        local breakdown = decode_breakdown(item and item.cost_breakdown_json or "{}")
+        breakdown.base_operational_cost_gold = row.cost
+        breakdown.forge_coal_allocated_gold = (item and item.forge_allocated_coal_gold or 0) + alloc
+        breakdown.forge_session_id = forge_session_id
+        item_breakdowns[row.item_id] = encode_breakdown(breakdown)
+        allocated_sum = allocated_sum + alloc
+      end
+    end
+
+    table.insert(events, {
+      event_type = "FORGE_ALLOCATE",
+      payload = {
+        forge_session_id = forge_session_id,
+        method = method,
+        allocations = allocations,
+        session_total_gold = coal_total,
+        computed_over = computed_over,
+        item_breakdowns = item_breakdowns
+      }
+    })
+  end
+
+  ledger.record_events(state, events)
+  for _, event in ipairs(events) do
+    ledger.apply_event(state, event)
+  end
+
+  return state
+end
+
+function ledger.apply_forge_close(state, forge_session_id, method, note)
+  return ledger.apply_forge_finalize(state, forge_session_id, "closed", method, note)
+end
+
+function ledger.apply_forge_expire(state, forge_session_id, note)
+  return ledger.apply_forge_finalize(state, forge_session_id, "expired", "cost_weighted", note)
+end
+
+function ledger.apply_augment_item(state, new_item_id, source_id, target_item_id, opts)
+  opts = opts or {}
+  local resolved_source_id = ensure_source_or_stub(state, source_id, "skill", "augmentation")
+  local target_item = state.crafted_items[target_item_id]
+  if not target_item then
+    error("Target item " .. tostring(target_item_id) .. " not found")
+  end
+
+  local materials = opts.materials or {}
+  local materials_cost = 0
+  if next(materials) ~= nil then
+    materials_cost = compute_material_cost(state, materials)
+  end
+  local fee = opts.fee_gold or 0
+  local time_cost = opts.time_cost_gold or 0
+  local parent_basis = target_item.operational_cost_gold or 0
+  local operational_cost = parent_basis + materials_cost + fee + time_cost
+
+  local breakdown = {
+    transform_kind = "augmentation",
+    parent_item_id = target_item_id,
+    parent_basis_gold = parent_basis,
+    materials = materials,
+    materials_cost_gold = materials_cost,
+    fee_gold = fee,
+    time_cost_gold = time_cost,
+    base_operational_cost_gold = operational_cost,
+    forge_coal_allocated_gold = 0
+  }
+
+  local event = ledger.record_event(state, "AUGMENT_ITEM", {
+    new_item_id = new_item_id,
+    source_id = resolved_source_id,
+    source_kind = "skill",
+    source_type = "augmentation",
+    target_item_id = target_item_id,
+    transform_kind = "augmentation",
+    materials = materials,
+    materials_source = next(materials) ~= nil and "explicit" or "manual",
+    materials_cost_gold = materials_cost,
+    fee_gold = fee,
+    time_cost_gold = time_cost,
+    operational_cost_gold = operational_cost,
+    appearance_key = opts.appearance_key,
+    note = opts.note,
+    cost_breakdown_json = encode_breakdown(breakdown),
+    crafted_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+  })
+
+  ledger.apply_event(state, event)
+  return state
+end
+
+function ledger.apply_craft_resolve(state, item_id, design_id, reason)
+  local resolved_design_id = resolve_source_id(state, design_id)
+  local event = ledger.record_event(state, "CRAFT_RESOLVE_SOURCE", {
+    item_id = item_id,
+    source_id = resolved_design_id,
+    source_kind = "design",
     design_id = resolved_design_id,
     reason = reason
   })
@@ -1030,26 +1591,34 @@ function ledger.report_item(state, item_id)
     end
   end
 
-  local design = item.design_id and state.designs[item.design_id] or nil
+  local source = item.source_id and state.production_sources[item.source_id] or nil
   local pattern_pool = nil
-  if design and design.pattern_pool_id then
-    pattern_pool = state.pattern_pools[design.pattern_pool_id]
+  if source and source.pattern_pool_id then
+    pattern_pool = state.pattern_pools[source.pattern_pool_id]
   end
 
   local report = {
     item_id = item_id,
-    design_id = item.design_id,
+    design_id = item.source_id,
+    source_id = item.source_id,
+    source_kind = item.source_kind,
     appearance_key = item.appearance_key,
     operational_cost_gold = item.operational_cost_gold,
+    base_operational_cost_gold = item_base_cost(item),
+    forge_allocated_coal_gold = item.forge_allocated_coal_gold or 0,
+    pending_forge_allocation = item.pending_forge_session_id ~= nil,
+    pending_forge_session_id = item.pending_forge_session_id,
+    transformed = item.transformed == 1,
+    parent_item_id = item.parent_item_id,
     cost_breakdown_json = item.cost_breakdown_json,
     sale_id = sale and sale.sale_id or nil,
     sale_price_gold = sale and sale.sale_price_gold or nil,
-    provenance = design and design.provenance or nil,
-    design_remaining = design and design.capital_remaining or nil,
+    provenance = source and source.provenance or nil,
+    design_remaining = source and source.capital_remaining or nil,
     pattern_remaining = pattern_pool and pattern_pool.capital_remaining_gold or nil
   }
 
-  if sale and item.design_id then
+  if sale and item.source_id then
     report.operational_profit = sale.operational_profit
     report.applied_to_design_capital = sale.applied_to_design_capital
     report.applied_to_pattern_capital = sale.applied_to_pattern_capital

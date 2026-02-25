@@ -283,6 +283,89 @@ describe("Schema Migration", function()
       db:close()
     end)
   end)
+
+  describe("migration v7", function()
+    it("should add production_sources and source columns", function()
+      local db = lsqlite3.open_memory()
+      schema.migrate(db, 7)
+
+      local stmt = db:prepare([[
+        SELECT name FROM sqlite_master
+        WHERE type='table' AND name=?
+      ]])
+      stmt:bind_values("production_sources")
+      local has_table = false
+      for _ in stmt:nrows() do
+        has_table = true
+        break
+      end
+      stmt:finalize()
+
+      assert.is_true(has_table, "Table production_sources should exist")
+
+      local crafted_columns = {}
+      stmt = db:prepare("PRAGMA table_info(crafted_items)")
+      for row in stmt:nrows() do
+        crafted_columns[row.name] = true
+      end
+      stmt:finalize()
+
+      assert.is_true(crafted_columns.source_id, "crafted_items.source_id should exist")
+      assert.is_true(crafted_columns.source_kind, "crafted_items.source_kind should exist")
+
+      local alias_columns = {}
+      stmt = db:prepare("PRAGMA table_info(design_id_aliases)")
+      for row in stmt:nrows() do
+        alias_columns[row.name] = true
+      end
+      stmt:finalize()
+      assert.is_true(alias_columns.source_id, "design_id_aliases.source_id should exist")
+
+      local appearance_columns = {}
+      stmt = db:prepare("PRAGMA table_info(design_appearance_aliases)")
+      for row in stmt:nrows() do
+        appearance_columns[row.name] = true
+      end
+      stmt:finalize()
+      assert.is_true(appearance_columns.source_id, "design_appearance_aliases.source_id should exist")
+
+      db:close()
+    end)
+  end)
+
+  describe("migration v8", function()
+    it("should add forge session and augmentation tables/columns", function()
+      local db = lsqlite3.open_memory()
+      schema.migrate(db, 8)
+
+      local tables = { "forge_sessions", "forge_session_items", "item_transformations", "forge_write_offs" }
+      for _, table_name in ipairs(tables) do
+        local stmt = db:prepare([[SELECT name FROM sqlite_master WHERE type='table' AND name=?]])
+        stmt:bind_values(table_name)
+        local has_table = false
+        for _ in stmt:nrows() do
+          has_table = true
+          break
+        end
+        stmt:finalize()
+        assert.is_true(has_table, "Table " .. table_name .. " should exist")
+      end
+
+      local crafted_columns = {}
+      local stmt = db:prepare("PRAGMA table_info(crafted_items)")
+      for row in stmt:nrows() do
+        crafted_columns[row.name] = true
+      end
+      stmt:finalize()
+
+      assert.is_true(crafted_columns.base_operational_cost_gold, "crafted_items.base_operational_cost_gold should exist")
+      assert.is_true(crafted_columns.forge_allocated_coal_gold, "crafted_items.forge_allocated_coal_gold should exist")
+      assert.is_true(crafted_columns.parent_item_id, "crafted_items.parent_item_id should exist")
+      assert.is_true(crafted_columns.transformed, "crafted_items.transformed should exist")
+
+      db:close()
+    end)
+  end)
   
   describe("migrate function", function()
     it("should migrate from version 0 to 1", function()
@@ -291,8 +374,8 @@ describe("Schema Migration", function()
       local initial_version = schema.get_version(db)
       assert.are.equal(0, initial_version)
       
-      local final_version = schema.migrate(db, 6)
-      assert.are.equal(6, final_version)
+      local final_version = schema.migrate(db, 8)
+      assert.are.equal(8, final_version)
       
       db:close()
     end)
@@ -324,8 +407,8 @@ describe("Schema Migration", function()
       
       local version = schema.migrate(db)
       
-      -- Should migrate to the latest version (currently 6)
-      assert.are.equal(6, version)
+      -- Should migrate to the latest version (currently 8)
+      assert.are.equal(8, version)
       
       db:close()
     end)

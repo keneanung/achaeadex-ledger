@@ -63,9 +63,11 @@ Use `adex help` in Mudlet for detailed usage and examples. Major command groups:
 - `adex inv` for opening inventory
 - `adex broker` for buys and sells
 - `adex pattern` for pattern pools
-- `adex design` for designs, aliases, and costs
+- `adex design` for designs, aliases, costs, and BOMs
+- `adex source` for skill sources and source BOMs
 - `adex process` for immediate and deferred processes
-- `adex craft` and `adex sell`
+- `adex craft` (supports `--design` or `--source`) and `adex sell`
+- `adex forge` and `adex augment` for forging/augmentation workflows
 - `adex order` for grouping sales
 - `adex report` for overall/year/order/design/item
 - `adex list` for discovery

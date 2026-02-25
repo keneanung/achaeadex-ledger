@@ -14,7 +14,7 @@ describe("EventStore", function()
     dofile("src/scripts/core/inventory.lua")
     dofile("src/scripts/core/deferred_processes.lua")
     dofile("src/scripts/core/pattern_pools.lua")
-    dofile("src/scripts/core/designs.lua")
+    dofile("src/scripts/core/production_sources.lua")
     dofile("src/scripts/core/recovery.lua")
     dofile("src/scripts/core/projector.lua")
     dofile("src/scripts/core/reports.lua")
@@ -103,10 +103,10 @@ describe("EventStore", function()
     assert.are.equal(inventory.get_qty(state1.inventory, "coal"), inventory.get_qty(state2.inventory, "coal"))
     assert.are.equal(inventory.get_qty(state1.inventory, "cloth"), inventory.get_qty(state2.inventory, "cloth"))
 
-    assert.are.equal(state1.designs["D1"].capital_remaining, state2.designs["D1"].capital_remaining)
+    assert.are.equal(state1.production_sources["D1"].capital_remaining, state2.production_sources["D1"].capital_remaining)
     assert.are.equal(state1.pattern_pools["P1"].capital_remaining_gold, state2.pattern_pools["P1"].capital_remaining_gold)
     assert.are.equal(state1.process_instances["PX"].status, state2.process_instances["PX"].status)
-    assert.are.equal(state1.designs["D1"].pattern_pool_id, state2.designs["D1"].pattern_pool_id)
+    assert.are.equal(state1.production_sources["D1"].pattern_pool_id, state2.production_sources["D1"].pattern_pool_id)
   end)
 
   it("rebuilds projections deterministically", function()
@@ -156,5 +156,44 @@ describe("EventStore", function()
     local row2 = cur2:fetch({}, "a")
     cur2:close()
     assert.are.equal("completed", row2.status)
+  end)
+
+  it("rebuild applies legacy craft resolve events", function()
+    if not luasql then
+      pending("LuaSQL sqlite3 not available")
+      return
+    end
+
+    local db_path = os.tmpname()
+    local store = sqlite_store.new(db_path)
+
+    store:append({
+      event_type = "CRAFT_ITEM",
+      payload = {
+        item_id = "I-LEGACY",
+        design_id = "D1",
+        operational_cost_gold = 10,
+        cost_breakdown_json = "{}",
+        crafted_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+      }
+    })
+
+    store:append({
+      event_type = "CRAFT_RESOLVE_DESIGN",
+      payload = {
+        item_id = "I-LEGACY",
+        design_id = "D1",
+        reason = "manual_map"
+      }
+    })
+
+    store:rebuild_projections()
+
+    local cur = assert(store.conn:execute("SELECT source_id, source_kind FROM crafted_items WHERE item_id = 'I-LEGACY'"))
+    local row = cur:fetch({}, "a")
+    cur:close()
+
+    assert.are.equal("D1", row.source_id)
+    assert.are.equal("design", row.source_kind)
   end)
 end)

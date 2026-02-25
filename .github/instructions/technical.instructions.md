@@ -49,8 +49,7 @@ The system uses a hybrid model:
    - Every user-visible action MUST produce one or more ledger events.
    - Events are immutable once written.
 
-2) Domain tables (designs, pattern_pools, crafted_items, sales, orders, process_instances, alias tables)
-   are MATERIALIZED PROJECTIONS (read models) derived from the ledger.
+2) Domain tables are MATERIALIZED PROJECTIONS (read models) derived from the ledger.
    - They exist for fast listing and reporting.
    - They MUST be updated only by applying ledger events.
    - Code MUST NOT write to domain tables “directly” as a primary action.
@@ -73,11 +72,29 @@ The system uses a hybrid model:
 
 6) Read path:
    - Reports and list commands should read from the domain tables for performance and simplicity.
-   - If any report needs derived values not stored, it may compute them from domain tables or from the event stream,
+   - If any report needs derived values not stored, it may compute them from the domain tables or from the event stream,
      but must remain deterministic.
 
 ------------------------------------------------------------
-MINIMUM TABLES
+PRODUCTION SOURCES (UNIFIED MODEL)
+------------------------------------------------------------
+
+All crafting originates from a Production Source.
+
+production_sources:
+- source_id: stable internal id
+- source_kind: "design" | "skill"
+- source_type: design_type for designs; skill category for skills (future: conjuration/augmentation/forging)
+- recovery_enabled: default depends on provenance for designs; for skills default 0
+- pattern_pool_id only applies to source_kind="design"
+- per_item_fee_gold may apply to any source
+- bom_json and pricing_policy_json are supported (design sources for MVP; skills future)
+
+Design IDs remain meaningful by using:
+- For design sources: source_id equals the internal design id (e.g., D1, D-YYYYMMDD-xxxx).
+
+------------------------------------------------------------
+MINIMUM TABLES (CANONICAL PROJECTIONS)
 ------------------------------------------------------------
 
 schema_version(
@@ -92,36 +109,35 @@ ledger_events(
   payload_json TEXT NOT NULL
 )
 
-designs(
-  design_id TEXT PRIMARY KEY,         -- internal stable id (never changes)
-  design_type TEXT NOT NULL,          -- used for pattern linking, simulator grouping, etc.
+production_sources(
+  source_id TEXT PRIMARY KEY,
+  source_kind TEXT NOT NULL,           -- "design" | "skill"
+  source_type TEXT NOT NULL,           -- design_type (design) or skill category (skill)
   name TEXT,
   created_at TEXT NOT NULL,
-  pattern_pool_id TEXT,               -- nullable if design not linked or not eligible
+  pattern_pool_id TEXT,                -- nullable; design sources only
   per_item_fee_gold INTEGER NOT NULL DEFAULT 0,
-  bom_json TEXT,                      -- JSON map of standard materials (BOM)
-  pricing_policy_json TEXT,           -- JSON policy override for price suggestions
-  provenance TEXT NOT NULL,           -- "private" | "public" | "organization"
-  recovery_enabled INTEGER NOT NULL,  -- 1/0; private defaults to 1, public/org default 0
-  status TEXT NOT NULL,               -- in_progress/approved/retired etc (flexible)
+  bom_json TEXT,                       -- JSON map { commodity: qty } for standard recipe
+  pricing_policy_json TEXT,            -- JSON policy for suggestions
+  provenance TEXT NOT NULL,            -- "private" | "public" | "organization" | "unknown"
+  recovery_enabled INTEGER NOT NULL,   -- 1/0
+  status TEXT NOT NULL,                -- flexible: in_progress/approved/retired/stub etc
   capital_remaining_gold INTEGER NOT NULL DEFAULT 0
 )
 
--- Supports in-game ID changes (draft->final). Multiple aliases may map to one design.
 design_id_aliases(
-  alias_id TEXT PRIMARY KEY,          -- the in-game design id string
-  design_id TEXT NOT NULL,            -- internal stable design_id
-  alias_kind TEXT NOT NULL,           -- "pre_final" | "final" | "other"
-  active INTEGER NOT NULL,            -- 1/0; latest final id can be active=1, old pre_final can be active=0
+  alias_id TEXT PRIMARY KEY,           -- in-game design id
+  source_id TEXT NOT NULL,             -- production_sources.source_id (design source)
+  alias_kind TEXT NOT NULL,            -- pre_final|final|other
+  active INTEGER NOT NULL,             -- 1/0
   created_at TEXT NOT NULL
 )
 
--- Supports craft attribution when craft output only references appearance.
 design_appearance_aliases(
-  appearance_key TEXT PRIMARY KEY,    -- normalized appearance string/key
-  design_id TEXT NOT NULL,
+  appearance_key TEXT PRIMARY KEY,     -- normalized appearance string
+  source_id TEXT NOT NULL,             -- production_sources.source_id (design source)
   created_at TEXT NOT NULL,
-  confidence TEXT NOT NULL            -- "manual" | "parsed" (MVP: manual only recommended)
+  confidence TEXT NOT NULL             -- manual|parsed
 )
 
 pattern_pools(
@@ -132,18 +148,19 @@ pattern_pools(
   deactivated_at TEXT,
   capital_initial_gold INTEGER NOT NULL,
   capital_remaining_gold INTEGER NOT NULL,
-  status TEXT NOT NULL                -- active/closed
+  status TEXT NOT NULL                 -- active|closed
 )
 
 crafted_items(
   item_id TEXT PRIMARY KEY,
-  design_id TEXT,                     -- nullable if unresolved at craft time; must be resolvable later
+  source_id TEXT,                      -- nullable if unresolved at craft time
+  source_kind TEXT NOT NULL DEFAULT 'design',
   crafted_at TEXT NOT NULL,
   operational_cost_gold INTEGER NOT NULL,
   cost_breakdown_json TEXT NOT NULL,
-  materials_json TEXT,                -- JSON map of materials used at craft
-  materials_source TEXT,              -- "design_bom" | "explicit" | "manual"
-  appearance_key TEXT                 -- store the observed appearance string/key for later resolution
+  appearance_key TEXT,
+  materials_json TEXT,                 -- JSON map { commodity: qty } (optional)
+  materials_source TEXT                -- design_bom|explicit|manual|estimated (optional)
 )
 
 sales(
@@ -156,7 +173,7 @@ sales(
   game_time_day INTEGER,
   game_time_hour INTEGER,
   game_time_minute INTEGER,
-  settlement_id TEXT                  -- optional link to order_settlements
+  settlement_id TEXT                   -- optional: link to order_settlements
 )
 
 orders(
@@ -164,7 +181,7 @@ orders(
   created_at TEXT NOT NULL,
   customer TEXT,
   note TEXT,
-  status TEXT NOT NULL
+  status TEXT NOT NULL                 -- open|closed|cancelled
 )
 
 order_sales(
@@ -184,52 +201,64 @@ order_settlements(
   order_id TEXT NOT NULL,
   amount_gold INTEGER NOT NULL,
   received_at TEXT NOT NULL,
-  method TEXT NOT NULL
+  method TEXT NOT NULL                 -- "cost_weighted" (MVP)
 )
 
--- Tracks deferred/in-flight processes so they can be completed later with known outputs.
 process_instances(
   process_instance_id TEXT PRIMARY KEY,
-  process_id TEXT NOT NULL,           -- e.g. refine, tan, smelt, cure, ferment, etc.
+  process_id TEXT NOT NULL,
   started_at TEXT NOT NULL,
   completed_at TEXT,
-  status TEXT NOT NULL,               -- "in_flight" | "completed" | "aborted"
+  status TEXT NOT NULL,                -- in_flight|completed|aborted
   note TEXT
 )
 
-process_write_offs(
-  write_off_id INTEGER PRIMARY KEY AUTOINCREMENT,
-  process_instance_id TEXT NOT NULL,
-  amount_gold INTEGER NOT NULL,
+------------------------------------------------------------
+LEGACY TABLES / COLUMNS (MAY EXIST IN OLDER DBS)
+------------------------------------------------------------
+
+These may exist in older installations and should be supported via migrations + rebuild:
+
+designs(
+  design_id TEXT PRIMARY KEY,
+  design_type TEXT NOT NULL,
+  name TEXT,
   created_at TEXT NOT NULL,
-  reason TEXT,
-  note TEXT
+  pattern_pool_id TEXT,
+  per_item_fee_gold INTEGER NOT NULL DEFAULT 0,
+  bom_json TEXT,
+  pricing_policy_json TEXT,
+  provenance TEXT NOT NULL,
+  recovery_enabled INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  capital_remaining_gold INTEGER NOT NULL DEFAULT 0
 )
+
+Legacy crafted_items column:
+- crafted_items.design_id (replaced by crafted_items.source_id/source_kind)
+
+SQLite internal table may exist:
+- sqlite_sequence (normal)
 
 ------------------------------------------------------------
 INDEXES (REQUIRED)
 ------------------------------------------------------------
 
-Add indexes to keep reads fast:
-
-- ledger_events(id) (implicit by PK), and ledger_events(ts) if used for filtering
-- sales(item_id), sales(sold_at)
-- crafted_items(design_id), crafted_items(item_id)
+- ledger_events(ts)
+- sales(item_id), sales(sold_at), sales(settlement_id)
+- crafted_items(source_id), crafted_items(item_id)
 - pattern_pools(pattern_type, status)
-- designs(design_type), designs(provenance), designs(recovery_enabled)
+- production_sources(source_kind), production_sources(source_type), production_sources(provenance), production_sources(recovery_enabled)
 - order_sales(order_id), order_sales(sale_id)
 - order_items(order_id), order_items(item_id)
 - order_settlements(order_id)
-- sales(settlement_id)
 - process_instances(status), process_instances(process_id)
-- design_id_aliases(design_id)
-- design_appearance_aliases(design_id)
+- design_id_aliases(source_id)
+- design_appearance_aliases(source_id)
 
 ------------------------------------------------------------
-EVENT TYPES (REQUIRED FOR REBUILD)
+EVENT TYPES (AUTHORITATIVE)
 ------------------------------------------------------------
-
-All of the following user-visible mutations MUST be represented as events in ledger_events:
 
 Inventory:
 - OPENING_INVENTORY
@@ -249,19 +278,19 @@ Patterns:
 - PATTERN_ACTIVATE
 - PATTERN_DEACTIVATE
 
-Designs:
-- DESIGN_START (or equivalent creation event)
-- DESIGN_COST
-- DESIGN_SET_PER_ITEM_FEE
-- DESIGN_SET_BOM
-- DESIGN_SET_PRICING
+Design Sources:
+- DESIGN_START
 - DESIGN_UPDATE
 - DESIGN_REGISTER_ALIAS
 - DESIGN_REGISTER_APPEARANCE
+- DESIGN_SET_BOM
+- DESIGN_SET_PRICING
+- DESIGN_COST
+- DESIGN_SET_PER_ITEM_FEE
 
 Crafting & Sales:
 - CRAFT_ITEM
-- CRAFT_RESOLVE_DESIGN
+- CRAFT_RESOLVE_SOURCE
 - SELL_ITEM
 
 Orders:
@@ -269,7 +298,11 @@ Orders:
 - ORDER_ADD_ITEM
 - ORDER_ADD_SALE
 - ORDER_SETTLE
-- ORDER_CLOSE (optional but recommended)
+- ORDER_CLOSE (optional)
+
+------------------------------------------------------------
+EVENT PAYLOAD SPECIFICATIONS (MUST SUPPORT)
+------------------------------------------------------------
 
 OPENING_INVENTORY supports:
 {
@@ -329,7 +362,7 @@ PROCESS_ADD_FEE must support:
 PROCESS_COMPLETE must support:
 {
   process_instance_id,
-  outputs: { commodity: qty },        -- now known
+  outputs: { commodity: qty },        -- MAY be empty
   note
 }
 
@@ -337,17 +370,25 @@ PROCESS_ABORT must support:
 {
   process_instance_id,
   disposition: {
-    returned: { commodity: qty },     -- returned to inventory
-    lost: { commodity: qty },         -- permanently lost/consumed with no output
-    outputs: { commodity: qty }       -- optional partial outputs on failure (if applicable)
+    returned: { commodity: qty },     -- returned to inventory (may be empty)
+    lost: { commodity: qty },         -- permanently lost/consumed (may be empty)
+    outputs: { commodity: qty }       -- optional partial outputs on failure
   },
   note
 }
 
+PROCESS_WRITE_OFF supports:
+{
+  process_instance_id,
+  amount_gold,
+  reason?,
+  note?
+}
+
 DESIGN_START supports:
 {
-  design_id,
-  design_type,
+  design_id,                          -- maps to source_id for design sources
+  design_type,                        -- maps to source_type
   name,
   provenance,
   recovery_enabled,
@@ -357,61 +398,77 @@ DESIGN_START supports:
   created_at?
 }
 
-DESIGN_REGISTER_ALIAS supports:
-{
-  design_id,
-  alias_id,           -- in-game id
-  alias_kind,         -- pre_final|final|other
-  active              -- 1/0
-}
-
-DESIGN_REGISTER_APPEARANCE supports:
-{
-  design_id,
-  appearance_key,     -- normalized appearance
-  confidence          -- manual|parsed
-}
-
-DESIGN_SET_BOM supports:
-{
-  design_id,
-  bom                -- { commodity: qty }
-}
-
-DESIGN_SET_PRICING supports:
-{
-  design_id,
-  pricing_policy     -- JSON-serializable policy override
-}
-
 DESIGN_UPDATE supports:
 {
-  design_id,
+  design_id,                          -- maps to source_id
   design_type?,
   name?,
   provenance?,
   recovery_enabled?,
   status?,
-  pattern_pool_id?   -- derived when recovery_enabled=1
+  pattern_pool_id?
+}
+
+DESIGN_REGISTER_ALIAS supports:
+{
+  design_id,                          -- maps to source_id
+  alias_id,                           -- in-game id
+  alias_kind,                         -- pre_final|final|other
+  active                              -- 1/0
+}
+
+DESIGN_REGISTER_APPEARANCE supports:
+{
+  design_id,                          -- maps to source_id
+  appearance_key,
+  confidence                           -- manual|parsed
+}
+
+DESIGN_SET_BOM supports:
+{
+  design_id,                          -- maps to source_id
+  bom                                 -- { commodity: qty }
+}
+
+DESIGN_SET_PRICING supports:
+{
+  design_id,                          -- maps to source_id
+  pricing_policy                      -- JSON-serializable policy override
+}
+
+DESIGN_COST supports:
+{
+  design_id,                          -- maps to source_id
+  amount_gold,
+  kind                                -- submission|resubmission|finalization|other
+}
+
+DESIGN_SET_PER_ITEM_FEE supports:
+{
+  design_id,                          -- maps to source_id
+  amount_gold
 }
 
 CRAFT_ITEM supports:
 {
   item_id,
-  design_id (optional),
-  appearance_key (optional but recommended),
+  source_id?,                         -- preferred (new)
+  source_kind?,                       -- preferred (new), default "design"
+  design_id?,                         -- legacy alias for source_id (design sources)
+  appearance_key?,
   operational_cost_gold,
   breakdown_json,
-  materials (optional),
-  materials_source (optional),
-  materials_cost_gold (optional)
+  materials?,
+  materials_source?,
+  materials_cost_gold?
 }
 
-CRAFT_RESOLVE_DESIGN supports:
+CRAFT_RESOLVE_SOURCE supports:
 {
   item_id,
-  design_id,
-  reason              -- e.g. "manual_map" | "appearance_map"
+  source_id,
+  source_kind,
+  reason                               -- manual_map|appearance_map|other
 }
 
 SELL_ITEM supports:
@@ -420,8 +477,17 @@ SELL_ITEM supports:
   item_id,
   sale_price_gold,
   sold_at,
-  game_time?,
-  settlement_id?     -- if created from order settlement
+  game_time?,                          -- object, must include year if present
+  settlement_id?                       -- if created from order settlement
+}
+
+ORDER_CREATE supports:
+{
+  order_id,
+  created_at?,
+  customer?,
+  note?,
+  status?
 }
 
 ORDER_ADD_ITEM supports:
@@ -430,156 +496,88 @@ ORDER_ADD_ITEM supports:
   item_id
 }
 
+ORDER_ADD_SALE supports:
+{
+  order_id,
+  sale_id
+}
+
 ORDER_SETTLE supports:
 {
   settlement_id,
   order_id,
   amount_gold,
-  method,            -- "cost_weighted"
+  method,                              -- "cost_weighted"
   received_at
 }
 
-- PROCESS_WRITE_OFF { process_instance_id, amount_gold, reason?, note? }
+ORDER_CLOSE supports:
+{
+  order_id,
+  closed_at?,
+  status?
+}
 
 ------------------------------------------------------------
-GENERIC PROCESS SEMANTICS
+BACKWARD COMPATIBILITY (LEDGER + PROJECTOR)
 ------------------------------------------------------------
 
-1) PROCESS_APPLY is for immediate processes where outputs are known at event time.
-2) Deferred processes MUST use PROCESS_START/COMPLETE (and optional ADD_* events).
-3) Inventory accounting rules for deferred processes:
-   - Inputs committed via PROCESS_START and PROCESS_ADD_INPUTS are treated as consumed/reserved deterministically.
-   - Outputs do not exist until PROCESS_COMPLETE or PROCESS_ABORT disposition includes outputs.
-   - No output may be assumed prior to completion.
+Ledger events are immutable and MUST NOT be rewritten.
 
-Implementation note:
-- For simplicity and determinism, treat committed inputs as consumed from inventory at the time they are committed.
-- If the game semantics are "reserved then consumed", the system may represent this as a separate internal bucket,
-  but accounting must remain deterministic and testable.
+The projector MUST support legacy event payload shapes by translating them at apply time.
 
-------------------------------------------------------------
-DESIGN WORKFLOW REQUIREMENTS
-------------------------------------------------------------
+Legacy support requirements:
+1) For any event payload that references designs by `design_id`:
+   - treat `design_id` as `source_id` with `source_kind="design"`.
 
-1) A design has a stable internal design_id.
-2) In-game IDs can change at finalization. The system must support:
-   - registering a pre-final alias id
-   - registering a final alias id
-   - marking alias active/inactive
-   - resolving either alias id to internal design_id
+2) Legacy craft resolution event type:
+   - If event_type is CRAFT_RESOLVE_DESIGN, interpret payload.design_id as source_id and apply as CRAFT_RESOLVE_SOURCE.
 
-3) Craft attribution may come only via appearance:
-   - Provide a manual command to map an appearance_key to a design_id.
-   - Craft events may initially store appearance_key and design_id=NULL.
-   - Later, CRAFT_RESOLVE_DESIGN binds the crafted item to a design_id.
+3) Legacy craft event payload:
+   - If payload.source_id is missing and payload.design_id exists, use that value as source_id (design kind).
 
-4) The system must never guess mapping if ambiguous:
-   - If an appearance_key maps to multiple designs, require manual resolution.
-   - Default confidence is "manual" for MVP.
-
-------------------------------------------------------------
-WATERFALL IMPLEMENTATION
-------------------------------------------------------------
-
-On SELL_ITEM:
-
-1) Compute operational_profit
-2) If the linked design has recovery_enabled=1:
-   - Reduce design capital
-   - Reduce pattern capital (if design has a pattern_pool_id)
-   - Remaining becomes true profit
-3) If recovery_enabled=0:
-   - operational_profit is true profit immediately
-
-Never compute amortization per unit.
+4) Domain tables:
+   - Migrations may move legacy tables/columns into the new schema.
+   - Rebuild must populate canonical projections regardless of legacy schema.
 
 ------------------------------------------------------------
 PROJECTOR (APPLY EVENTS TO PROJECTIONS)
 ------------------------------------------------------------
 
-1) Implement an event projector that applies a ledger event to the domain tables.
-2) The projector MUST be deterministic and idempotent for rebuild purposes.
-3) The online write path MUST be:
-   - append event -> apply projector -> commit transaction
-4) The rebuild path MUST:
-   - truncate domain tables
-   - replay all ledger_events in order (by id)
-   - apply projector for each event
-   - produce the same domain table state as normal operation
+- Deterministic and idempotent.
+- Online write path: append event -> apply -> commit.
+- Rebuild: truncate projections -> replay ledger -> apply.
 
-5) Reports and lists should use the domain tables, not recompute everything by replaying events each time.
-
-Projector requirements for PROCESS_WRITE_OFF:
-- Persist the write-off amount so it can be reported (either as an event-only aggregation or a projection table).
-- The projector MUST NOT modify inventory quantities for PROCESS_WRITE_OFF (inventory was already adjusted at commit time).
-- The projector MUST make the write-off visible in profit reports (Overall/Year) as operational expense.
+PROCESS_WRITE_OFF:
+- Must be persisted for reporting.
+- Must not modify inventory.
 
 ------------------------------------------------------------
-COMMANDS (MVP)
+COMMANDS (MVP TOPICS)
 ------------------------------------------------------------
 
-inv init
-broker buy
-pattern activate
-pattern deactivate
-
-design start <design_id> <type> <name> [--provenance private|public|organization] [--recovery 0|1]
-design update <design_id> [--type <type>] [--name <name>] [--provenance private|public|organization] [--recovery 0|1]
-design alias add <design_id> <alias_id> <pre_final|final|other> [--active 0|1]
-design appearance map <design_id> <appearance_key>         -- manual mapping
-
-design bom set <design_id> --materials <k=v,...>
-design bom show <design_id>
-
-design cost <design_id> <amount> <kind>
-design set-fee <design_id> <amount>
-design pricing set <design_id> [--round <gold>] [--low-markup <pct>] [--low-min <gold>] [--low-max <gold>]
-                              [--mid-markup <pct>] [--mid-min <gold>] [--mid-max <gold>]
-                              [--high-markup <pct>] [--high-min <gold>] [--high-max <gold>]
-
--- Immediate process:
-process apply <process_id> --inputs <k=v,...> --outputs <k=v,...> [--fee <gold>] [--note <text>]
-
--- Deferred process lifecycle:
-process start <process_instance_id> <process_id> [--inputs <k=v,...>] [--fee <gold>] [--note <text>]
-process add-inputs <process_instance_id> --inputs <k=v,...> [--note <text>]
-process add-fee <process_instance_id> --fee <gold> [--note <text>]
-process complete <process_instance_id> --outputs <k=v,...> [--note <text>]
-process abort <process_instance_id> --returned <k=v,...> --lost <k=v,...> [--outputs <k=v,...>] [--note <text>]
-
-craft <item_id> [--materials <k=v,...>] [--appearance <appearance_key>] [--design <design_id>] [--time <hours>] [--cost <gold>]
-craft resolve <item_id> <design_id>                         -- binds after the fact (manual)
-
-sell <sale_id> <item_id> <sale_price>
-
-order add-item <order_id> <item_id>
-order settle <order_id> <amount_gold> [--method cost_weighted]
-
-report item <item_id>
-sim price <design_id> <price>
-sim units <design_id> <units>
-price suggest <item_id>
-
-Manual entry only required for MVP.
-Triggers/parsing are optional and must not be required.
+- inv
+- broker
+- pattern
+- design
+- process
+- craft
+- sell
+- order
+- report
+- sim
+- price
+- maintenance
+- list
+- config
 
 ------------------------------------------------------------
 MAINTENANCE COMMANDS (MVP)
 ------------------------------------------------------------
 
-Provide at least:
-
 - adex maintenance stats
-  - prints: ledger_events count, DB size (if available), last event id, and optionally last rebuild timestamp
-
 - adex maintenance rebuild
-  - rebuilds domain tables by replaying ledger_events
-  - prints: counts per domain table after rebuild
-  - MUST NOT lose ledger_events
-
-Optional:
-- adex maintenance vacuum
-  - runs SQLite VACUUM (manual, user-invoked)
+- adex maintenance vacuum (optional)
 
 ------------------------------------------------------------
 BUILD

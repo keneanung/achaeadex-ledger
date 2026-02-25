@@ -182,18 +182,18 @@ local function get_game_time()
 end
 
 local function resolve_design_id_for_sim(state, design_id)
-  if state.designs and state.designs[design_id] then
+  if state.production_sources and state.production_sources[design_id] then
     return design_id
   end
   local alias = state.design_aliases and state.design_aliases[design_id] or nil
-  if alias and alias.design_id then
-    return alias.design_id
+  if alias and alias.source_id then
+    return alias.source_id
   end
   return design_id
 end
 
-local function compute_op_cost_from_bom(state, design)
-  if not design or not design.bom then
+local function compute_op_cost_from_bom(state, source)
+  if not source or not source.bom then
     return nil
   end
 
@@ -203,12 +203,12 @@ local function compute_op_cost_from_bom(state, design)
   end
 
   local total = 0
-  for commodity, qty in pairs(design.bom) do
+  for commodity, qty in pairs(source.bom) do
     local unit_cost = inventory.get_unit_cost(state.inventory, commodity)
     total = total + (unit_cost * qty)
   end
 
-  return total + (design.per_item_fee_gold or 0)
+  return total + (source.per_item_fee_gold or 0)
 end
 
 local function render_totals(render, totals)
@@ -235,6 +235,9 @@ local function render_holdings(render, holdings)
   end
   if holdings.wip_value ~= nil then
     table.insert(rows, { label = "WIP value", value = fmt(holdings.wip_value) })
+  end
+  if holdings.unallocated_forge_session_costs ~= nil then
+    table.insert(rows, { label = "Unallocated forge session costs", value = fmt(holdings.unallocated_forge_session_costs) })
   end
   if holdings.unsold_items_value ~= nil then
     table.insert(rows, { label = "Unsold crafted items value", value = fmt(holdings.unsold_items_value) })
@@ -334,6 +337,24 @@ local help_topics = {
       }
     }
   },
+  source = {
+    title = "Source",
+    purpose = "Create production sources such as skill sources.",
+    commands = {
+      {
+        usage = "adex source create skill [<source_id>] <source_type> <name>",
+        example = "adex source create skill forging \"Forging\""
+      },
+      {
+        usage = "adex source bom set <source_id> --materials k=v,...",
+        example = "adex source bom set SK-FORGE --materials metal=4"
+      },
+      {
+        usage = "adex source bom show <source_id>",
+        example = "adex source bom show SK-FORGE"
+      }
+    }
+  },
   order = {
     title = "Order",
     purpose = "Group items and sales into orders.",
@@ -392,15 +413,51 @@ local help_topics = {
   },
   craft = {
     title = "Craft",
-    purpose = "Record crafted items with materials, BOM, or manual cost (unknown designs create stubs).",
+    purpose = "Record crafted items with materials, BOM, or manual cost from designs or skill sources.",
     commands = {
       {
-        usage = "adex craft [<item_id>] [--materials k=v,...] [--appearance <appearance_key>] [--design <design_id>] [--time <hours>] [--cost <gold>]",
-        example = "adex craft D1 --materials leather=2 --appearance \"simple black shirt\""
+        usage = "adex craft [<item_id>] [--materials k=v,...] [--appearance <appearance_key>] [--design <design_id> | --source <source_id>] [--kind design|skill] [--source-type <type>] [--time <hours>] [--cost <gold>]",
+        example = "adex craft --source SK-FORGE --materials metal=4 --appearance \"runed longsword\""
       },
       {
         usage = "adex craft resolve <item_id> <design_id>",
         example = "adex craft resolve I-20260215-0001 D1"
+      }
+    }
+  },
+  forge = {
+    title = "Forge",
+    purpose = "Manage forge sessions and forged skill crafts.",
+    commands = {
+      {
+        usage = "adex forge fire [<forge_session_id>] --source <forging_source_id> [--coal-cost <gold>] [--expires <minutes>] [--note <text>]",
+        example = "adex forge fire --source SK-FORGE --expires 30"
+      },
+      {
+        usage = "adex forge craft [<item_id>] --source <forging_source_id> [--d1 <descriptor>] [--d2 <descriptor>] [--materials k=v,...] [--appearance <key>] [--time <hours>] [--note <text>]",
+        example = "adex forge craft --source SK-FORGE --d1 runed --materials metal=4"
+      },
+      {
+        usage = "adex forge attach <forge_session_id> <item_id>",
+        example = "adex forge attach F-20260225-0001 I-20260225-0001"
+      },
+      {
+        usage = "adex forge close <forge_session_id> [--method cost_weighted] [--note <text>]",
+        example = "adex forge close F-20260225-0001"
+      },
+      {
+        usage = "adex forge expire <forge_session_id> [--note <text>]",
+        example = "adex forge expire F-20260225-0001"
+      }
+    }
+  },
+  augment = {
+    title = "Augment",
+    purpose = "Transform an existing item into a new augmented item.",
+    commands = {
+      {
+        usage = "adex augment [<new_item_id>] --source <augmentation_source_id> --target <item_id> [--materials k=v,...] [--fee <gold>] [--appearance <key>] [--time <hours>] [--note <text>]",
+        example = "adex augment --source SK-AUG --target I-20260225-0001 --materials gem=1 --fee 25"
       }
     }
   },
@@ -467,7 +524,11 @@ local help_topics = {
         example = "adex list designs --provenance private"
       },
       {
-        usage = "adex list items [--design <design_id>] [--sold 0|1] [--unresolved 1]",
+        usage = "adex list sources [--kind design|skill] [--type <source_type>] [--provenance <value>] [--recovery 0|1]",
+        example = "adex list sources --kind skill"
+      },
+      {
+        usage = "adex list items [--source <design_id>] [--sold 0|1] [--unresolved 1]",
         example = "adex list items --unresolved 1"
       },
       {
@@ -481,6 +542,10 @@ local help_topics = {
       {
         usage = "adex list processes [--status in_flight|completed|aborted] [--process <process_id>]",
         example = "adex list processes --status in_flight"
+      },
+      {
+        usage = "adex list forge [--status in_flight|closed|expired] [--source <source_id>]",
+        example = "adex list forge --status in_flight"
       }
     }
   },
@@ -573,7 +638,7 @@ function commands.help(topic)
     })
 
     render.section("Topics")
-    local order = { "inv", "broker", "pattern", "design", "order", "process", "craft", "sell", "report", "list", "price", "sim", "config", "maintenance" }
+    local order = { "inv", "broker", "pattern", "design", "source", "order", "process", "craft", "forge", "augment", "sell", "report", "list", "price", "sim", "config", "maintenance" }
     local rows = {}
     for _, topic_name in ipairs(order) do
       local entry = help_topics[topic_name]
@@ -599,7 +664,7 @@ function commands.help(topic)
   out_plain("  operational cost: material WAC + fees + time cost per item")
   out_plain("  true profit: profit after design and pattern capital recovery")
   out_plain("Commands:")
-  local order = { "inv", "broker", "pattern", "design", "order", "process", "craft", "sell", "report", "list", "price", "sim", "config", "maintenance" }
+  local order = { "inv", "broker", "pattern", "design", "source", "order", "process", "craft", "forge", "augment", "sell", "report", "list", "price", "sim", "config", "maintenance" }
   for _, topic_name in ipairs(order) do
     local entry = help_topics[topic_name]
     if entry then
@@ -710,9 +775,13 @@ function commands.handle(input)
     _G.AchaeadexLedger.Mudlet.State = fresh_state
     render.section("Maintenance Rebuild")
     render.kv_block({
-      { label = "Designs", value = tostring(counts.designs or 0) },
+      { label = "Production sources", value = tostring(counts.production_sources or 0) },
+      { label = "Designs (legacy)", value = tostring(counts.designs or 0) },
       { label = "Pattern pools", value = tostring(counts.pattern_pools or 0) },
       { label = "Crafted items", value = tostring(counts.crafted_items or 0) },
+      { label = "Forge sessions", value = tostring(counts.forge_sessions or 0) },
+      { label = "Forge session items", value = tostring(counts.forge_session_items or 0) },
+      { label = "Item transformations", value = tostring(counts.item_transformations or 0) },
       { label = "Sales", value = tostring(counts.sales or 0) },
       { label = "Orders", value = tostring(counts.orders or 0) },
       { label = "Order sales", value = tostring(counts.order_sales or 0) },
@@ -819,7 +888,7 @@ function commands.handle(input)
 
     if not design_id then
       design_id = id_generator.generate("D", function(id)
-        return state.designs[id] ~= nil
+        return state.production_sources[id] ~= nil
       end)
       out("created_id: " .. tostring(design_id))
     end
@@ -909,10 +978,10 @@ function commands.handle(input)
       error_out("usage: adex design bom show <design_id>")
       return
     end
-    local design = state.designs[design_id]
+    local design = state.production_sources[design_id]
     if not design and state.design_aliases and state.design_aliases[design_id] then
-      local resolved = state.design_aliases[design_id].design_id
-      design = state.designs[resolved]
+      local resolved = state.design_aliases[design_id].source_id
+      design = state.production_sources[resolved]
       design_id = resolved
     end
     if not design then
@@ -1018,6 +1087,288 @@ function commands.handle(input)
     end
 
     ledger.apply_design_set_pricing(state, design_id, policy)
+    out("OK")
+    return
+  end
+
+  if cmd == "source" and tokens[2] == "create" and tokens[3] == "skill" then
+    local args, flags = parse_flags(tokens, 4)
+    local source_id = nil
+    local source_type = nil
+    local name = nil
+    if #args == 3 then
+      source_id = args[1]
+      source_type = args[2]
+      name = args[3]
+    elseif #args == 2 then
+      source_type = args[1]
+      name = args[2]
+    end
+
+    if not source_type or not name then
+      error_out("usage: adex source create skill [<source_id>] <source_type> <name>")
+      return
+    end
+
+    if not source_id then
+      source_id = id_generator.generate("SK", function(id)
+        return state.production_sources[id] ~= nil
+      end)
+      out("created_id: " .. tostring(source_id))
+    end
+
+    ledger.apply_source_create(state, source_id, "skill", source_type, name, {
+      provenance = flags.provenance or "system",
+      status = "active",
+      recovery_enabled = 0
+    })
+    out("OK")
+    return
+  end
+
+  if cmd == "source" and tokens[2] == "bom" and tokens[3] == "set" then
+    local source_id = tokens[4]
+    local args, flags = parse_flags(tokens, 5)
+    local materials = parse_kv_list(flags.materials)
+    if not source_id or not flags.materials then
+      error_out("usage: adex source bom set <source_id> --materials k=v,...")
+      return
+    end
+    local ok, err = validate_materials(materials)
+    if not ok then
+      error_out(err)
+      return
+    end
+    ledger.apply_design_set_bom(state, source_id, materials)
+    out("OK")
+    return
+  end
+
+  if cmd == "source" and tokens[2] == "bom" and tokens[3] == "show" then
+    local source_id = tokens[4]
+    if not source_id then
+      error_out("usage: adex source bom show <source_id>")
+      return
+    end
+
+    local source = state.production_sources[source_id]
+    if not source and state.design_aliases and state.design_aliases[source_id] then
+      local resolved = state.design_aliases[source_id].source_id
+      source = state.production_sources[resolved]
+      source_id = resolved
+    end
+    if not source then
+      error_out("source not found")
+      return
+    end
+
+    render.section("Source BOM")
+    render.kv_block({
+      { label = "Source", value = source_id },
+      { label = "Kind", value = source.source_kind or "unknown" },
+      { label = "Type", value = source.source_type or "unknown" }
+    })
+
+    local rows = {}
+    if source.bom then
+      for commodity, qty in pairs(source.bom) do
+        table.insert(rows, { commodity = commodity, qty = tostring(qty) })
+      end
+    end
+
+    table.sort(rows, function(a, b)
+      return a.commodity < b.commodity
+    end)
+
+    if #rows > 0 then
+      render.table(rows, {
+        { key = "commodity", label = "Commodity", nowrap = true, min = 12 },
+        { key = "qty", label = "Qty", align = "right", min = 4 }
+      })
+    else
+      render.print("(no BOM set)")
+    end
+
+    return
+  end
+
+  if cmd == "forge" and tokens[2] == "fire" then
+    local args, flags = parse_flags(tokens, 3)
+    local forge_session_id = args[1]
+    local source_id = flags.source
+    local coal_cost = flags["coal-cost"] and tonumber(flags["coal-cost"]) or nil
+    local expires_minutes = flags.expires and tonumber(flags.expires) or nil
+    local note = flags.note
+
+    if not source_id then
+      error_out("usage: adex forge fire [<forge_session_id>] --source <forging_source_id> [--coal-cost <gold>] [--expires <minutes>] [--note <text>]")
+      return
+    end
+
+    if not forge_session_id then
+      forge_session_id = id_generator.generate("F", function(id)
+        return state.forge_sessions[id] ~= nil
+      end)
+      out("created_id: " .. tostring(forge_session_id))
+    end
+
+    local expires_at = nil
+    if expires_minutes and expires_minutes > 0 then
+      expires_at = os.date("!%Y-%m-%dT%H:%M:%SZ", os.time() + (expires_minutes * 60))
+    end
+
+    ledger.apply_forge_fire(state, forge_session_id, source_id, {
+      coal_cost_gold = coal_cost,
+      expires_at = expires_at,
+      note = note
+    })
+    out("OK")
+    return
+  end
+
+  if cmd == "forge" and tokens[2] == "attach" then
+    local forge_session_id = tokens[3]
+    local item_id = tokens[4]
+    if not forge_session_id or not item_id then
+      error_out("usage: adex forge attach <forge_session_id> <item_id>")
+      return
+    end
+    ledger.apply_forge_attach(state, forge_session_id, item_id)
+    out("OK")
+    return
+  end
+
+  if cmd == "forge" and tokens[2] == "close" then
+    local forge_session_id = tokens[3]
+    local args, flags = parse_flags(tokens, 4)
+    local method = flags.method or "cost_weighted"
+    local note = flags.note
+    if not forge_session_id then
+      error_out("usage: adex forge close <forge_session_id> [--method cost_weighted] [--note <text>]")
+      return
+    end
+    ledger.apply_forge_close(state, forge_session_id, method, note)
+    out("OK")
+    return
+  end
+
+  if cmd == "forge" and tokens[2] == "expire" then
+    local forge_session_id = tokens[3]
+    local args, flags = parse_flags(tokens, 4)
+    local note = flags.note
+    if not forge_session_id then
+      error_out("usage: adex forge expire <forge_session_id> [--note <text>]")
+      return
+    end
+    ledger.apply_forge_expire(state, forge_session_id, note)
+    out("OK")
+    return
+  end
+
+  if cmd == "forge" and tokens[2] == "craft" then
+    local args, flags = parse_flags(tokens, 3)
+    local item_id = args[1]
+    local source_id = flags.source
+    local appearance_key = flags.appearance
+    local descriptor_1 = flags.d1
+    local descriptor_2 = flags.d2
+    local time_hours = flags.time and tonumber(flags.time) or 0
+    local note = flags.note
+
+    if not source_id then
+      error_out("usage: adex forge craft [<item_id>] --source <forging_source_id> [--d1 <descriptor>] [--d2 <descriptor>] [--materials k=v,...] [--appearance <key>] [--time <hours>] [--note <text>]")
+      return
+    end
+
+    if not item_id then
+      item_id = id_generator.generate("I", function(id)
+        return state.crafted_items[id] ~= nil
+      end)
+      out("created_id: " .. tostring(item_id))
+    end
+
+    local materials = nil
+    if flags.materials then
+      materials = parse_kv_list(flags.materials)
+      local ok, err = validate_materials(materials)
+      if not ok then
+        error_out(err)
+        return
+      end
+    else
+      render.warning("WARNING: Estimated materials used")
+    end
+
+    if not appearance_key then
+      local parts = {}
+      if descriptor_1 and descriptor_1 ~= "" then
+        table.insert(parts, descriptor_1)
+      end
+      if descriptor_2 and descriptor_2 ~= "" then
+        table.insert(parts, descriptor_2)
+      end
+      if #parts > 0 then
+        appearance_key = table.concat(parts, " ")
+      end
+    end
+
+    local time_cost_per_hour = config.get_time_cost_per_hour and config.get_time_cost_per_hour() or (tonumber(config.get("time_cost_per_hour")) or 0)
+    local time_cost = math.floor((time_hours or 0) * time_cost_per_hour)
+    ledger.apply_source_craft_auto(state, item_id, source_id, "skill", {
+      source_type = "forging",
+      materials = materials,
+      appearance_key = appearance_key,
+      manual_cost = flags.cost and tonumber(flags.cost) or nil,
+      allow_estimated = materials == nil and not flags.cost,
+      time_hours = time_hours,
+      time_cost_gold = time_cost,
+      note = note
+    })
+    out("OK")
+    return
+  end
+
+  if cmd == "augment" then
+    local args, flags = parse_flags(tokens, 2)
+    local new_item_id = args[1]
+    local source_id = flags.source
+    local target_item_id = flags.target
+    local fee = flags.fee and tonumber(flags.fee) or 0
+    local time_hours = flags.time and tonumber(flags.time) or 0
+    local appearance_key = flags.appearance
+    local note = flags.note
+
+    if not source_id or not target_item_id then
+      error_out("usage: adex augment [<new_item_id>] --source <augmentation_source_id> --target <item_id> [--materials k=v,...] [--fee <gold>] [--appearance <key>] [--time <hours>] [--note <text>]")
+      return
+    end
+
+    if not new_item_id then
+      new_item_id = id_generator.generate("I", function(id)
+        return state.crafted_items[id] ~= nil
+      end)
+      out("created_id: " .. tostring(new_item_id))
+    end
+
+    local materials = {}
+    if flags.materials then
+      materials = parse_kv_list(flags.materials)
+      local ok, err = validate_materials(materials)
+      if not ok then
+        error_out(err)
+        return
+      end
+    end
+
+    local time_cost_per_hour = config.get_time_cost_per_hour and config.get_time_cost_per_hour() or (tonumber(config.get("time_cost_per_hour")) or 0)
+    local time_cost = math.floor((time_hours or 0) * time_cost_per_hour)
+    ledger.apply_augment_item(state, new_item_id, source_id, target_item_id, {
+      materials = materials,
+      fee_gold = fee,
+      time_cost_gold = time_cost,
+      appearance_key = appearance_key,
+      note = note
+    })
     out("OK")
     return
   end
@@ -1238,9 +1589,16 @@ function commands.handle(input)
     local args, flags = parse_flags(tokens, 2)
     local item_id = nil
     local design_id = flags.design
+    local source_id = flags.source
+    local source_kind = flags.kind
+    local source_type = flags["source-type"]
     local manual_cost = flags.cost and tonumber(flags.cost) or nil
     if #args > 1 then
-      error_out("usage: adex craft [<item_id>] [--materials k=v,...] [--appearance <appearance_key>] [--design <design_id>] [--time <hours>] [--cost <gold>]")
+      error_out("usage: adex craft [<item_id>] [--materials k=v,...] [--appearance <appearance_key>] [--design <design_id> | --source <source_id>] [--kind design|skill] [--source-type <type>] [--time <hours>] [--cost <gold>]")
+      return
+    end
+    if design_id and source_id then
+      error_out("provide only one of --design or --source")
       return
     end
     if #args == 1 then
@@ -1251,9 +1609,35 @@ function commands.handle(input)
     if flags.time then
       time_hours = tonumber(flags.time)
       if time_hours == nil or time_hours < 0 then
-        error_out("usage: adex craft [<item_id>] [--materials k=v,...] [--appearance <appearance_key>] [--design <design_id>] [--time <hours>] [--cost <gold>]")
+        error_out("usage: adex craft [<item_id>] [--materials k=v,...] [--appearance <appearance_key>] [--design <design_id> | --source <source_id>] [--kind design|skill] [--source-type <type>] [--time <hours>] [--cost <gold>]")
         return
       end
+    end
+
+    if source_kind and source_kind ~= "design" and source_kind ~= "skill" then
+      error_out("--kind must be design or skill")
+      return
+    end
+
+    if design_id and source_kind and source_kind ~= "design" then
+      error_out("--kind skill cannot be used with --design")
+      return
+    end
+
+    if design_id and not source_id then
+      source_id = design_id
+      source_kind = source_kind or "design"
+    end
+
+    if source_id and not source_kind then
+      local source = state.production_sources and state.production_sources[source_id] or nil
+      if not source and state.design_aliases and state.design_aliases[source_id] then
+        local resolved = state.design_aliases[source_id].source_id
+        source = state.production_sources and state.production_sources[resolved] or nil
+        source_id = resolved or source_id
+      end
+      source_kind = source and source.source_kind or "skill"
+      source_type = source_type or (source and source.source_type or nil)
     end
 
     local materials = nil
@@ -1267,16 +1651,19 @@ function commands.handle(input)
     end
 
     if not materials and manual_cost == nil then
-      local resolved_design_id = design_id
-      if design_id and state.designs[design_id] == nil and state.design_aliases and state.design_aliases[design_id] then
-        resolved_design_id = state.design_aliases[design_id].design_id
+      local resolved_source_id = source_id
+      if resolved_source_id and state.production_sources[resolved_source_id] == nil and state.design_aliases and state.design_aliases[resolved_source_id] then
+        resolved_source_id = state.design_aliases[resolved_source_id].source_id
       end
-      local design = resolved_design_id and state.designs[resolved_design_id] or nil
-      if not (design and design.bom) then
-        error_out("design has no BOM; use --materials or --cost")
+
+      local source = resolved_source_id and state.production_sources[resolved_source_id] or nil
+      if not (source and source.bom) then
+        error_out("source has no BOM; use --materials or --cost")
         return
       end
-      design_id = resolved_design_id
+      source_id = resolved_source_id
+      source_kind = source_kind or source.source_kind
+      source_type = source_type or source.source_type
     end
 
     if not item_id then
@@ -1292,13 +1679,24 @@ function commands.handle(input)
       render.warning("WARNING: Manual craft cost used; no materials recorded.")
     end
 
-    ledger.apply_craft_item_auto(state, item_id, design_id, {
-      materials = materials,
-      appearance_key = appearance_key,
-      manual_cost = manual_cost,
-      time_cost_gold = time_cost,
-      time_hours = time_hours
-    })
+    if source_id then
+      ledger.apply_source_craft_auto(state, item_id, source_id, source_kind or "skill", {
+        source_type = source_type,
+        materials = materials,
+        appearance_key = appearance_key,
+        manual_cost = manual_cost,
+        time_cost_gold = time_cost,
+        time_hours = time_hours
+      })
+    else
+      ledger.apply_craft_item_auto(state, item_id, design_id, {
+        materials = materials,
+        appearance_key = appearance_key,
+        manual_cost = manual_cost,
+        time_cost_gold = time_cost,
+        time_hours = time_hours
+      })
+    end
     out("OK")
     return
   end
@@ -1348,8 +1746,18 @@ function commands.handle(input)
       { label = "Item", value = report.item_id },
       { label = "Design", value = report.design_id or "(unresolved)" },
       { label = "Provenance", value = report.provenance or "unknown" },
+      { label = "Base operational cost", value = fmt(report.base_operational_cost_gold or report.operational_cost_gold) },
+      { label = "Allocated forge share", value = fmt(report.forge_allocated_coal_gold or 0) },
       { label = "Operational cost", value = fmt(report.operational_cost_gold) }
     })
+
+    if report.pending_forge_allocation then
+      render.warning("WARNING: pending forge session allocation for " .. tostring(report.pending_forge_session_id or "unknown session"))
+    end
+
+    if report.transformed then
+      render.warning("WARNING: item has been transformed into another item")
+    end
 
     if report.sale_price_gold then
       render.section("Sale")
@@ -1387,7 +1795,7 @@ function commands.handle(input)
   if cmd == "list" then
     local topic = tokens[2]
     if not topic then
-      error_out("usage: adex list <commodities|patterns|designs|items|sales|orders|processes>")
+      error_out("usage: adex list <commodities|patterns|designs|sources|items|sales|orders|processes|forge>")
       return
     end
 
@@ -1472,10 +1880,47 @@ function commands.handle(input)
       return
     end
 
+    if topic == "sources" then
+      local recovery = flags.recovery and tonumber(flags.recovery) or nil
+      local rows = listings.list_sources(state, {
+        kind = flags.kind,
+        type = flags.type,
+        provenance = flags.provenance,
+        recovery = recovery
+      })
+      render.section("Sources")
+      local display_rows = {}
+      for _, row in ipairs(rows) do
+        local source_name = row.name or ""
+        source_name = source_name:gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+        table.insert(display_rows, {
+          source_id = row.source_id,
+          source_kind = row.source_kind,
+          source_type = row.source_type,
+          name = source_name,
+          provenance = row.provenance or "",
+          recovery_enabled = tostring(row.recovery_enabled),
+          status = row.status or "",
+          capital_remaining = render.format_gold and render.format_gold(row.capital_remaining) or tostring(row.capital_remaining)
+        })
+      end
+      render.table(display_rows, {
+        { key = "source_id", label = "Source ID", nowrap = true, min = 10 },
+        { key = "source_kind", label = "Kind", nowrap = true, min = 6 },
+        { key = "source_type", label = "Type", nowrap = true, min = 8 },
+        { key = "name", label = "Name", min = 10 },
+        { key = "provenance", label = "Prov", nowrap = true, min = 4 },
+        { key = "recovery_enabled", label = "Rec", nowrap = true, min = 3 },
+        { key = "status", label = "Status", nowrap = true, min = 11 },
+        { key = "capital_remaining", label = "Remaining", nowrap = true, min = 9 }
+      })
+      return
+    end
+
     if topic == "items" then
       local sold = flags.sold and tonumber(flags.sold)
       local rows = listings.list_items(state, {
-        design = flags.design,
+        source = flags.source or flags.design,
         sold = sold == nil and nil or sold == 1,
         unresolved = flags.unresolved and tonumber(flags.unresolved) == 1
       })
@@ -1571,6 +2016,36 @@ function commands.handle(input)
         { key = "status", label = "Status", nowrap = true, min = 8 },
         { key = "started_at", label = "Started", nowrap = true, min = 10 },
         { key = "completed_at", label = "Completed", nowrap = true, min = 10 }
+      })
+      return
+    end
+
+    if topic == "forge" then
+      local rows = listings.list_forge_sessions(state, {
+        status = flags.status,
+        source = flags.source
+      })
+      render.section("Forge Sessions")
+      local display_rows = {}
+      for _, row in ipairs(rows) do
+        table.insert(display_rows, {
+          forge_session_id = row.forge_session_id,
+          source_id = row.source_id or "",
+          status = row.status,
+          started_at = row.started_at or "",
+          expires_at = row.expires_at or "",
+          allocated_total_gold = render.format_gold and render.format_gold(row.allocated_total_gold) or tostring(row.allocated_total_gold),
+          attached_items = tostring(row.attached_items or 0)
+        })
+      end
+      render.table(display_rows, {
+        { key = "forge_session_id", label = "Session ID", nowrap = true, min = 12 },
+        { key = "source_id", label = "Source", nowrap = true, min = 10 },
+        { key = "status", label = "Status", nowrap = true, min = 8 },
+        { key = "started_at", label = "Started", nowrap = true, min = 10 },
+        { key = "expires_at", label = "Expires", nowrap = true, min = 10 },
+        { key = "allocated_total_gold", label = "Allocated", align = "right", min = 9 },
+        { key = "attached_items", label = "Items", align = "right", min = 5 }
       })
       return
     end
@@ -1813,7 +2288,7 @@ function commands.handle(input)
       return
     end
 
-    local design = item.design_id and state.designs[item.design_id] or nil
+    local design = item.source_id and state.production_sources[item.source_id] or nil
     local policy = design and design.pricing_policy or nil
     local policy_used = policy and "design" or "default"
     local result = pricing.suggest_prices(item.operational_cost_gold, policy)
@@ -1821,7 +2296,7 @@ function commands.handle(input)
     render.section("Price Suggest")
     render.kv_block({
       { label = "Item", value = item_id },
-      { label = "Design", value = item.design_id or "" },
+      { label = "Design", value = item.source_id or "" },
       { label = "Policy", value = policy_used }
     })
     render.kv_block({
@@ -1850,13 +2325,13 @@ function commands.handle(input)
       return
     end
     local resolved_id = resolve_design_id_for_sim(state, design_id)
-    local design = state.designs[resolved_id]
+    local design = state.production_sources[resolved_id]
     if not op_cost then
       op_cost = compute_op_cost_from_bom(state, design)
     end
     if not op_cost then
       for _, item in pairs(state.crafted_items) do
-        if item.design_id == resolved_id then
+        if item.source_id == resolved_id then
           op_cost = item.operational_cost_gold
         end
       end
@@ -1884,13 +2359,13 @@ function commands.handle(input)
       return
     end
     local resolved_id = resolve_design_id_for_sim(state, design_id)
-    local design = state.designs[resolved_id]
+    local design = state.production_sources[resolved_id]
     if not op_cost then
       op_cost = compute_op_cost_from_bom(state, design)
     end
     if not op_cost then
       for _, item in pairs(state.crafted_items) do
-        if item.design_id == resolved_id then
+        if item.source_id == resolved_id then
           op_cost = item.operational_cost_gold
         end
       end

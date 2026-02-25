@@ -273,17 +273,23 @@ end
 
 function sqlite_store:domain_counts()
   local tables = {
+    "production_sources",
     "designs",
     "design_id_aliases",
     "design_appearance_aliases",
     "pattern_pools",
     "crafted_items",
+    "forge_sessions",
+    "forge_session_items",
+    "item_transformations",
     "sales",
     "orders",
     "order_items",
     "order_sales",
     "order_settlements",
-    "process_instances"
+    "process_instances",
+    "process_write_offs",
+    "forge_write_offs"
   }
 
   local counts = {}

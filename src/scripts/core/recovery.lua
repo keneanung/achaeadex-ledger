@@ -6,14 +6,14 @@ _G.AchaeadexLedger.Core = _G.AchaeadexLedger.Core or {}
 
 local recovery = _G.AchaeadexLedger.Core.Recovery or {}
 
-local function get_designs()
+local function get_sources()
   if not _G.AchaeadexLedger
     or not _G.AchaeadexLedger.Core
-    or not _G.AchaeadexLedger.Core.Designs then
-    error("AchaeadexLedger.Core.Designs is not loaded")
+    or not _G.AchaeadexLedger.Core.ProductionSources then
+    error("AchaeadexLedger.Core.ProductionSources is not loaded")
   end
 
-  return _G.AchaeadexLedger.Core.Designs
+  return _G.AchaeadexLedger.Core.ProductionSources
 end
 
 local function get_pattern_pools()
@@ -65,18 +65,28 @@ function recovery.apply_waterfall(op_profit, design_remaining, pattern_remaining
   return result
 end
 
-function recovery.apply_to_state(state, design_id, op_profit)
-  local designs = get_designs()
+function recovery.apply_to_state(state, source_id, op_profit)
+  local sources = get_sources()
   local pattern_pools = get_pattern_pools()
 
-  if not state.designs or not state.designs[design_id] then
-    error("Design " .. design_id .. " not found")
+  if not state.production_sources or not state.production_sources[source_id] then
+    error("Design " .. source_id .. " not found")
   end
 
-  local design = state.designs[design_id]
+  local source = state.production_sources[source_id]
+  if source.source_kind ~= "design" then
+    return {
+      operational_profit = op_profit,
+      applied_to_design_capital = 0,
+      applied_to_pattern_capital = 0,
+      true_profit = op_profit,
+      design_remaining = 0,
+      pattern_remaining = 0
+    }
+  end
   local pattern_remaining = 0
-  if design.pattern_pool_id then
-    local pool = state.pattern_pools and state.pattern_pools[design.pattern_pool_id]
+  if source.pattern_pool_id then
+    local pool = state.pattern_pools and state.pattern_pools[source.pattern_pool_id]
     if pool then
       pattern_remaining = pool.capital_remaining_gold or 0
     end
@@ -84,18 +94,18 @@ function recovery.apply_to_state(state, design_id, op_profit)
 
   local result = recovery.apply_waterfall(
     op_profit,
-    design.capital_remaining or 0,
+    source.capital_remaining or 0,
     pattern_remaining,
-    design.recovery_enabled
+    source.recovery_enabled
   )
 
-  if design.recovery_enabled == 1 and op_profit > 0 then
+  if source.recovery_enabled == 1 and op_profit > 0 then
     if result.applied_to_design_capital > 0 then
-      designs.apply_recovery(state, design_id, result.applied_to_design_capital)
+      sources.apply_recovery(state, source_id, result.applied_to_design_capital)
     end
 
-    if design.pattern_pool_id and result.applied_to_pattern_capital > 0 then
-      pattern_pools.apply_recovery(state, design.pattern_pool_id, result.applied_to_pattern_capital)
+    if source.pattern_pool_id and result.applied_to_pattern_capital > 0 then
+      pattern_pools.apply_recovery(state, source.pattern_pool_id, result.applied_to_pattern_capital)
     end
   end
 

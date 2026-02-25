@@ -20,6 +20,10 @@
     "isActive": "yes"
   },
   {
+    "name": "production_sources",
+    "isActive": "yes"
+  },
+  {
     "name": "recovery",
     "isActive": "yes"
   },

@@ -11,7 +11,7 @@ describe("Ledger Core", function()
     dofile("src/scripts/core/inventory.lua")
     dofile("src/scripts/core/deferred_processes.lua")
     dofile("src/scripts/core/pattern_pools.lua")
-    dofile("src/scripts/core/designs.lua")
+    dofile("src/scripts/core/production_sources.lua")
     dofile("src/scripts/core/recovery.lua")
     dofile("src/scripts/core/ledger.lua")
     dofile("src/scripts/core/storage/memory_event_store.lua")
@@ -29,7 +29,7 @@ describe("Ledger Core", function()
       assert.is_not_nil(state)
       assert.is_not_nil(state.event_store)
       assert.is_not_nil(state.inventory)
-      assert.are.same({}, state.designs)
+      assert.are.same({}, state.production_sources)
       assert.are.same({}, state.pattern_pools)
     end)
   end)
@@ -201,12 +201,12 @@ describe("Ledger Core", function()
       
       ledger.apply_design_start(state, "D1", "shirt", "Simple Black Shirt", "private", nil)
       
-      assert.is_not_nil(state.designs["D1"])
-      assert.are.equal("shirt", state.designs["D1"].design_type)
-      assert.are.equal("Simple Black Shirt", state.designs["D1"].name)
-      assert.are.equal("private", state.designs["D1"].provenance)
-      assert.are.equal(1, state.designs["D1"].recovery_enabled)
-      assert.are.equal(0, state.designs["D1"].capital_remaining)
+      assert.is_not_nil(state.production_sources["D1"])
+      assert.are.equal("shirt", state.production_sources["D1"].source_type)
+      assert.are.equal("Simple Black Shirt", state.production_sources["D1"].name)
+      assert.are.equal("private", state.production_sources["D1"].provenance)
+      assert.are.equal(1, state.production_sources["D1"].recovery_enabled)
+      assert.are.equal(0, state.production_sources["D1"].capital_remaining)
     end)
     
     it("should create public design with default recovery disabled", function()
@@ -215,9 +215,9 @@ describe("Ledger Core", function()
       
       ledger.apply_design_start(state, "D2", "boots", "Plain Boots", "public", nil)
       
-      assert.is_not_nil(state.designs["D2"])
-      assert.are.equal("public", state.designs["D2"].provenance)
-      assert.are.equal(0, state.designs["D2"].recovery_enabled)
+      assert.is_not_nil(state.production_sources["D2"])
+      assert.are.equal("public", state.production_sources["D2"].provenance)
+      assert.are.equal(0, state.production_sources["D2"].recovery_enabled)
     end)
     
     it("should allow explicit recovery_enabled override", function()
@@ -229,8 +229,58 @@ describe("Ledger Core", function()
       -- Public design with recovery enabled (unusual but allowed)
       ledger.apply_design_start(state, "D3", "shirt", "Special Org Shirt", "organization", 1)
       
-      assert.are.equal("organization", state.designs["D3"].provenance)
-      assert.are.equal(1, state.designs["D3"].recovery_enabled)
+      assert.are.equal("organization", state.production_sources["D3"].provenance)
+      assert.are.equal(1, state.production_sources["D3"].recovery_enabled)
+    end)
+  end)
+
+  describe("backward compatibility", function()
+    it("maps legacy CRAFT_ITEM design_id to source_id", function()
+      local store = memory_store.new()
+      local state = ledger.new(store)
+
+      ledger.apply_event(state, {
+        event_type = "CRAFT_ITEM",
+        payload = {
+          item_id = "I-LEGACY",
+          design_id = "D1",
+          operational_cost_gold = 10,
+          cost_breakdown_json = "{}",
+          crafted_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+        }
+      })
+
+      local item = state.crafted_items["I-LEGACY"]
+      assert.are.equal("D1", item.source_id)
+      assert.are.equal("design", item.source_kind)
+    end)
+
+    it("treats CRAFT_RESOLVE_DESIGN as CRAFT_RESOLVE_SOURCE", function()
+      local store = memory_store.new()
+      local state = ledger.new(store)
+
+      ledger.apply_event(state, {
+        event_type = "CRAFT_ITEM",
+        payload = {
+          item_id = "I-RESOLVE",
+          operational_cost_gold = 10,
+          cost_breakdown_json = "{}",
+          crafted_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+        }
+      })
+
+      ledger.apply_event(state, {
+        event_type = "CRAFT_RESOLVE_DESIGN",
+        payload = {
+          item_id = "I-RESOLVE",
+          design_id = "D1",
+          reason = "manual_map"
+        }
+      })
+
+      local item = state.crafted_items["I-RESOLVE"]
+      assert.are.equal("D1", item.source_id)
+      assert.are.equal("design", item.source_kind)
     end)
   end)
   
@@ -245,7 +295,7 @@ describe("Ledger Core", function()
       ledger.apply_design_cost(state, "D1", 5000, "submission")
       ledger.apply_design_cost(state, "D1", 1000, "resubmission")
       
-      assert.are.equal(6000, state.designs["D1"].capital_remaining)
+      assert.are.equal(6000, state.production_sources["D1"].capital_remaining)
     end)
     
     it("should not track capital for public designs", function()
@@ -256,7 +306,7 @@ describe("Ledger Core", function()
       ledger.apply_design_cost(state, "D2", 5000, "submission")
       
       -- Since recovery is disabled, capital should not accumulate
-      assert.are.equal(0, state.designs["D2"].capital_remaining)
+      assert.are.equal(0, state.production_sources["D2"].capital_remaining)
     end)
   end)
   
@@ -270,7 +320,7 @@ describe("Ledger Core", function()
       ledger.apply_design_start(state, "D1", "jewellery", "Fancy Ring", "private", 1)
       ledger.apply_design_set_fee(state, "D1", 15)
       
-      assert.are.equal(15, state.designs["D1"].per_item_fee_gold)
+      assert.are.equal(15, state.production_sources["D1"].per_item_fee_gold)
     end)
   end)
   

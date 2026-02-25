@@ -1,17 +1,17 @@
 -- Busted tests for recovery waterfall and pattern pools
 
 describe("Recovery", function()
-  local designs
+  local sources
   local pattern_pools
   local recovery
 
   before_each(function()
     _G.AchaeadexLedger = nil
     dofile("src/scripts/core/pattern_pools.lua")
-    dofile("src/scripts/core/designs.lua")
+    dofile("src/scripts/core/production_sources.lua")
     dofile("src/scripts/core/recovery.lua")
 
-    designs = _G.AchaeadexLedger.Core.Designs
+    sources = _G.AchaeadexLedger.Core.ProductionSources
     pattern_pools = _G.AchaeadexLedger.Core.PatternPools
     recovery = _G.AchaeadexLedger.Core.Recovery
   end)
@@ -48,11 +48,11 @@ describe("Recovery", function()
   end)
 
   it("shares a pattern pool across designs", function()
-    local state = { designs = {}, pattern_pools = {}, pattern_pools_by_type = {} }
+    local state = { production_sources = {}, pattern_pools = {}, pattern_pools_by_type = {} }
     pattern_pools.activate(state, "P1", "shirt", "Pool", 150, "2026-02-14T00:00:00Z")
 
-    local d1 = designs.create(state, "D1", "shirt", "Design 1", "private", 1)
-    local d2 = designs.create(state, "D2", "shirt", "Design 2", "private", 1)
+    local d1 = sources.create_design(state, "D1", "shirt", "Design 1", "private", 1)
+    local d2 = sources.create_design(state, "D2", "shirt", "Design 2", "private", 1)
 
     d1.capital_remaining = 0
     d2.capital_remaining = 0
@@ -67,8 +67,8 @@ describe("Recovery", function()
   end)
 
   it("does not recover for public designs by default", function()
-    local state = { designs = {}, pattern_pools = {}, pattern_pools_by_type = {} }
-    local design = designs.create(state, "Dpub", "boots", "Public", "public", nil)
+    local state = { production_sources = {}, pattern_pools = {}, pattern_pools_by_type = {} }
+    local design = sources.create_design(state, "Dpub", "boots", "Public", "public", nil)
     design.capital_remaining = 5000
 
     local result = recovery.apply_to_state(state, "Dpub", 100)

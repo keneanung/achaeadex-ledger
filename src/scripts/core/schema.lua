@@ -173,6 +173,125 @@ schema.migrations = {
     );
 
     CREATE INDEX IF NOT EXISTS idx_process_write_offs_instance ON process_write_offs(process_instance_id);
+  ]],
+  [7] = [[
+    CREATE TABLE IF NOT EXISTS production_sources (
+      source_id TEXT PRIMARY KEY,
+      source_kind TEXT NOT NULL,
+      source_type TEXT NOT NULL,
+      name TEXT,
+      created_at TEXT NOT NULL,
+      pattern_pool_id TEXT,
+      per_item_fee_gold INTEGER NOT NULL DEFAULT 0,
+      bom_json TEXT,
+      pricing_policy_json TEXT,
+      provenance TEXT NOT NULL,
+      recovery_enabled INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      capital_remaining_gold INTEGER NOT NULL DEFAULT 0
+    );
+
+    ALTER TABLE crafted_items ADD COLUMN source_id TEXT;
+    ALTER TABLE crafted_items ADD COLUMN source_kind TEXT DEFAULT 'design';
+
+    ALTER TABLE design_id_aliases ADD COLUMN source_id TEXT;
+    ALTER TABLE design_appearance_aliases ADD COLUMN source_id TEXT;
+
+    INSERT OR IGNORE INTO production_sources (
+      source_id,
+      source_kind,
+      source_type,
+      name,
+      created_at,
+      pattern_pool_id,
+      per_item_fee_gold,
+      bom_json,
+      pricing_policy_json,
+      provenance,
+      recovery_enabled,
+      status,
+      capital_remaining_gold
+    )
+    SELECT
+      design_id,
+      'design',
+      design_type,
+      name,
+      created_at,
+      pattern_pool_id,
+      per_item_fee_gold,
+      bom_json,
+      pricing_policy_json,
+      provenance,
+      recovery_enabled,
+      status,
+      capital_remaining_gold
+    FROM designs;
+
+    UPDATE crafted_items SET source_id = design_id, source_kind = 'design'
+    WHERE source_id IS NULL AND design_id IS NOT NULL;
+
+    UPDATE design_id_aliases SET source_id = design_id WHERE source_id IS NULL;
+    UPDATE design_appearance_aliases SET source_id = design_id WHERE source_id IS NULL;
+
+    CREATE INDEX IF NOT EXISTS idx_production_sources_kind ON production_sources(source_kind);
+    CREATE INDEX IF NOT EXISTS idx_production_sources_type ON production_sources(source_type);
+    CREATE INDEX IF NOT EXISTS idx_production_sources_provenance ON production_sources(provenance);
+    CREATE INDEX IF NOT EXISTS idx_production_sources_recovery ON production_sources(recovery_enabled);
+    CREATE INDEX IF NOT EXISTS idx_crafted_items_source_id ON crafted_items(source_id);
+    CREATE INDEX IF NOT EXISTS idx_design_id_aliases_source_id ON design_id_aliases(source_id);
+    CREATE INDEX IF NOT EXISTS idx_design_appearance_aliases_source_id ON design_appearance_aliases(source_id);
+  ]],
+  [8] = [[
+    CREATE TABLE IF NOT EXISTS forge_sessions (
+      forge_session_id TEXT PRIMARY KEY,
+      source_id TEXT,
+      started_at TEXT NOT NULL,
+      expires_at TEXT,
+      closed_at TEXT,
+      status TEXT NOT NULL,
+      coal_basis_gold INTEGER NOT NULL,
+      allocated_total_gold INTEGER NOT NULL DEFAULT 0,
+      note TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS forge_session_items (
+      forge_session_id TEXT NOT NULL,
+      item_id TEXT NOT NULL,
+      allocated_coal_gold INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (forge_session_id, item_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS item_transformations (
+      new_item_id TEXT PRIMARY KEY,
+      old_item_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS forge_write_offs (
+      write_off_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      forge_session_id TEXT NOT NULL,
+      amount_gold INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      reason TEXT,
+      note TEXT
+    );
+
+    ALTER TABLE crafted_items ADD COLUMN base_operational_cost_gold INTEGER;
+    ALTER TABLE crafted_items ADD COLUMN forge_allocated_coal_gold INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE crafted_items ADD COLUMN parent_item_id TEXT;
+    ALTER TABLE crafted_items ADD COLUMN transformed INTEGER NOT NULL DEFAULT 0;
+
+    UPDATE crafted_items SET base_operational_cost_gold = operational_cost_gold
+    WHERE base_operational_cost_gold IS NULL;
+
+    CREATE INDEX IF NOT EXISTS idx_forge_sessions_status ON forge_sessions(status);
+    CREATE INDEX IF NOT EXISTS idx_forge_sessions_source_id ON forge_sessions(source_id);
+    CREATE INDEX IF NOT EXISTS idx_forge_session_items_session ON forge_session_items(forge_session_id);
+    CREATE INDEX IF NOT EXISTS idx_forge_session_items_item ON forge_session_items(item_id);
+    CREATE INDEX IF NOT EXISTS idx_item_transformations_old_item ON item_transformations(old_item_id);
+    CREATE INDEX IF NOT EXISTS idx_forge_write_offs_session ON forge_write_offs(forge_session_id);
   ]]
 }
 
