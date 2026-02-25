@@ -292,6 +292,51 @@ schema.migrations = {
     CREATE INDEX IF NOT EXISTS idx_forge_session_items_item ON forge_session_items(item_id);
     CREATE INDEX IF NOT EXISTS idx_item_transformations_old_item ON item_transformations(old_item_id);
     CREATE INDEX IF NOT EXISTS idx_forge_write_offs_session ON forge_write_offs(forge_session_id);
+  ]],
+  [9] = [[
+    CREATE TABLE IF NOT EXISTS external_items (
+      item_id TEXT PRIMARY KEY,
+      name TEXT,
+      acquired_at TEXT NOT NULL,
+      basis_gold INTEGER NOT NULL,
+      basis_source TEXT NOT NULL,
+      status TEXT NOT NULL,
+      note TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_external_items_status ON external_items(status);
+    CREATE INDEX IF NOT EXISTS idx_external_items_basis_source ON external_items(basis_source);
+  ]],
+  [10] = [[
+    DROP TABLE IF EXISTS process_write_offs;
+
+    CREATE TABLE IF NOT EXISTS process_write_offs (
+      process_instance_id TEXT NOT NULL,
+      at TEXT NOT NULL,
+      amount_gold INTEGER NOT NULL,
+      reason TEXT,
+      note TEXT,
+      game_time_json TEXT,
+      PRIMARY KEY (process_instance_id, at)
+    );
+
+    CREATE TABLE IF NOT EXISTS process_game_time_overrides (
+      process_instance_id TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      game_time_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      note TEXT,
+      PRIMARY KEY (process_instance_id, scope)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_process_write_offs_process ON process_write_offs(process_instance_id);
+    CREATE INDEX IF NOT EXISTS idx_process_write_offs_at ON process_write_offs(at);
+    CREATE INDEX IF NOT EXISTS idx_process_game_time_overrides_process ON process_game_time_overrides(process_instance_id);
+    CREATE INDEX IF NOT EXISTS idx_process_game_time_overrides_updated_at ON process_game_time_overrides(updated_at);
+  ]],
+  [11] = [[
+    ALTER TABLE sales ADD COLUMN game_time_json TEXT;
+    CREATE INDEX IF NOT EXISTS idx_sales_game_time_json ON sales(game_time_json);
   ]]
 }
 

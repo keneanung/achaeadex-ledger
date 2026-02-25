@@ -278,6 +278,7 @@ function sqlite_store:domain_counts()
     "design_id_aliases",
     "design_appearance_aliases",
     "pattern_pools",
+    "external_items",
     "crafted_items",
     "forge_sessions",
     "forge_session_items",
@@ -288,6 +289,7 @@ function sqlite_store:domain_counts()
     "order_sales",
     "order_settlements",
     "process_instances",
+    "process_game_time_overrides",
     "process_write_offs",
     "forge_write_offs"
   }

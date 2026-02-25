@@ -158,16 +158,48 @@ function listings.list_items(state, opts)
   for _, item in pairs(state.crafted_items or {}) do
     local sold = sales_by_item[item.item_id] ~= nil
     local unresolved = item.source_id == nil
+    local transformed = item.transformed == 1
 
     if (not source_filter or item.source_id == source_filter)
       and (opts.sold == nil or sold == opts.sold)
+      and (opts.transformed == nil or transformed == opts.transformed)
       and (not opts.unresolved or unresolved) then
+      local status = "active"
+      if sold then
+        status = "sold"
+      elseif transformed then
+        status = "transformed"
+      end
       table.insert(rows, {
         item_id = item.item_id,
         design_id = item.source_id,
+        item_kind = "crafted",
         appearance_key = item.appearance_key,
         crafted_at = item.crafted_at,
-        sold = sold
+        sold = sold,
+        transformed = transformed,
+        status = status
+      })
+    end
+  end
+
+  for _, item in pairs(state.external_items or {}) do
+    local sold = sales_by_item[item.item_id] ~= nil or item.status == "sold"
+    local unresolved = false
+    local transformed = item.status == "transformed"
+    if (not source_filter)
+      and (opts.sold == nil or sold == opts.sold)
+      and (opts.transformed == nil or transformed == opts.transformed)
+      and (not opts.unresolved or unresolved) then
+      table.insert(rows, {
+        item_id = item.item_id,
+        design_id = "(external)",
+        item_kind = "external",
+        appearance_key = item.name,
+        crafted_at = item.acquired_at,
+        sold = sold,
+        transformed = transformed,
+        status = item.status or (sold and "sold" or "active")
       })
     end
   end
@@ -213,6 +245,7 @@ function listings.list_orders(state, opts)
 
   for _, order in pairs(state.orders or {}) do
     local sale_ids = state.order_sales and state.order_sales[order.order_id] or {}
+    local commodity_sale_ids = state.order_commodity_sales and state.order_commodity_sales[order.order_id] or {}
     local count = 0
     local revenue = 0
 
@@ -221,6 +254,14 @@ function listings.list_orders(state, opts)
       if sale then
         count = count + 1
         revenue = revenue + (sale.sale_price_gold or 0)
+      end
+    end
+
+    for sale_id, _ in pairs(commodity_sale_ids) do
+      local sale = state.commodity_sales and state.commodity_sales[sale_id] or nil
+      if sale then
+        count = count + 1
+        revenue = revenue + (sale.revenue or 0)
       end
     end
 

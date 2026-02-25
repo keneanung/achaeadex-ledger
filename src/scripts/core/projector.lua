@@ -181,6 +181,33 @@ function projector.apply(conn, event)
     return
   end
 
+  if event_type == "ITEM_REGISTER_EXTERNAL" then
+    exec_sql(conn, string.format(
+      "INSERT OR REPLACE INTO external_items (item_id, name, acquired_at, basis_gold, basis_source, status, note) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+      sql_value(payload.item_id),
+      sql_value(payload.name),
+      sql_value(payload.acquired_at or ts),
+      sql_value(payload.basis_gold or 0),
+      sql_value(payload.basis_source or "unknown"),
+      sql_value(payload.status or "active"),
+      sql_value(payload.note)
+    ))
+    return
+  end
+
+  if event_type == "ITEM_UPDATE_EXTERNAL" then
+    exec_sql(conn, string.format(
+      "UPDATE external_items SET name = COALESCE(%s, name), basis_gold = COALESCE(%s, basis_gold), basis_source = COALESCE(%s, basis_source), status = COALESCE(%s, status), note = COALESCE(%s, note) WHERE item_id = %s",
+      sql_value(payload.name),
+      sql_value(payload.basis_gold),
+      sql_value(payload.basis_source),
+      sql_value(payload.status),
+      sql_value(payload.note),
+      sql_value(payload.item_id)
+    ))
+    return
+  end
+
   if event_type == "DESIGN_START" then
     local json = get_json()
     local source_id, source_kind, source_type = normalize_source_payload(payload)
@@ -402,6 +429,10 @@ function projector.apply(conn, event)
       "UPDATE crafted_items SET transformed = 1 WHERE item_id = %s",
       sql_value(payload.target_item_id)
     ))
+    exec_sql(conn, string.format(
+      "UPDATE external_items SET status = 'transformed' WHERE item_id = %s",
+      sql_value(payload.target_item_id)
+    ))
 
     exec_sql(conn, string.format(
       "INSERT OR REPLACE INTO crafted_items (item_id, design_id, source_id, source_kind, crafted_at, operational_cost_gold, base_operational_cost_gold, forge_allocated_coal_gold, parent_item_id, transformed, cost_breakdown_json, appearance_key, materials_json, materials_source) " ..
@@ -534,9 +565,11 @@ function projector.apply(conn, event)
   if event_type == "SELL_ITEM" then
     if payload.sale_id then
       local game_time = payload.game_time or {}
+      local json = get_json()
+      local game_time_json = payload.game_time and json.encode(payload.game_time) or nil
       exec_sql(conn, string.format(
-        "INSERT OR REPLACE INTO sales (sale_id, item_id, sold_at, sale_price_gold, game_time_year, game_time_month, game_time_day, game_time_hour, game_time_minute, settlement_id) " ..
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        "INSERT OR REPLACE INTO sales (sale_id, item_id, sold_at, sale_price_gold, game_time_year, game_time_month, game_time_day, game_time_hour, game_time_minute, game_time_json, settlement_id) " ..
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         sql_value(payload.sale_id),
         sql_value(payload.item_id),
         sql_value(payload.sold_at or ts),
@@ -546,15 +579,24 @@ function projector.apply(conn, event)
         sql_value(game_time.day),
         sql_value(game_time.hour),
         sql_value(game_time.minute),
+        sql_value(game_time_json),
         sql_value(payload.settlement_id)
       ))
 
       local item_row = fetch_one(conn, "SELECT source_id, source_kind, operational_cost_gold FROM crafted_items WHERE item_id = " .. sql_value(payload.item_id))
-      if not item_row or not item_row.source_id then
-        error("Crafted item " .. tostring(payload.item_id) .. " not found or unresolved")
+      if item_row and item_row.source_id then
+        local op_profit = (payload.sale_price_gold or 0) - (tonumber(item_row.operational_cost_gold) or 0)
+        update_recovery(conn, item_row.source_id, op_profit)
+      else
+        local ext_row = fetch_one(conn, "SELECT basis_gold FROM external_items WHERE item_id = " .. sql_value(payload.item_id))
+        if not ext_row then
+          error("Item " .. tostring(payload.item_id) .. " not found")
+        end
+        exec_sql(conn, string.format(
+          "UPDATE external_items SET status = 'sold' WHERE item_id = %s",
+          sql_value(payload.item_id)
+        ))
       end
-      local op_profit = (payload.sale_price_gold or 0) - (tonumber(item_row.operational_cost_gold) or 0)
-      update_recovery(conn, item_row.source_id, op_profit)
       return
     end
 
@@ -662,12 +704,32 @@ function projector.apply(conn, event)
   end
 
   if event_type == "PROCESS_WRITE_OFF" then
+    local json = get_json()
+    local game_time_json = payload.game_time and json.encode(payload.game_time) or nil
     exec_sql(conn, string.format(
-      "INSERT INTO process_write_offs (process_instance_id, amount_gold, created_at, reason, note) VALUES (%s, %s, %s, %s, %s)",
+      "INSERT OR REPLACE INTO process_write_offs (process_instance_id, at, amount_gold, reason, note, game_time_json) VALUES (%s, %s, %s, %s, %s, %s)",
       sql_value(payload.process_instance_id),
-      sql_value(payload.amount_gold or 0),
       sql_value(ts),
+      sql_value(payload.amount_gold or 0),
       sql_value(payload.reason),
+      sql_value(payload.note),
+      sql_value(game_time_json)
+    ))
+    return
+  end
+
+  if event_type == "PROCESS_SET_GAME_TIME" then
+    local json = get_json()
+    local game_time_json = payload.game_time and json.encode(payload.game_time) or nil
+    if not game_time_json then
+      error("PROCESS_SET_GAME_TIME requires payload.game_time")
+    end
+    exec_sql(conn, string.format(
+      "INSERT OR REPLACE INTO process_game_time_overrides (process_instance_id, scope, game_time_json, updated_at, note) VALUES (%s, %s, %s, %s, %s)",
+      sql_value(payload.process_instance_id),
+      sql_value(payload.scope or "write_off"),
+      sql_value(game_time_json),
+      sql_value(ts),
       sql_value(payload.note)
     ))
     return
@@ -683,6 +745,7 @@ function projector.truncate_domains(conn)
     "item_transformations",
     "forge_session_items",
     "forge_sessions",
+    "process_game_time_overrides",
     "process_write_offs",
     "order_items",
     "order_settlements",
@@ -694,6 +757,7 @@ function projector.truncate_domains(conn)
     "crafted_items",
     "process_instances",
     "pattern_pools",
+    "external_items",
     "production_sources",
     "designs"
   }

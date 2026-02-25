@@ -97,4 +97,28 @@ describe("Forge and augment workflows", function()
     assert.are.equal(165, state.crafted_items["I-AUG"].operational_cost_gold)
     assert.are.equal("I-BASE", state.item_transformations["I-AUG"].old_item_id)
   end)
+
+  it("augmentation uses source BOM when explicit materials are omitted", function()
+    local store = memory_store.new()
+    local state = ledger.new(store)
+
+    ledger.apply_opening_inventory(state, "leather", 10, 20)
+    ledger.apply_opening_inventory(state, "gem", 2, 100)
+
+    ledger.apply_design_start(state, "D1", "shirt", "Base Shirt", "public", 0)
+    ledger.apply_source_craft_auto(state, "I-BASE2", "D1", "design", {
+      materials = { leather = 2 }
+    })
+
+    ledger.apply_source_create(state, "SK-AUG", "skill", "augmentation", "Augmentation")
+    ledger.apply_design_set_bom(state, "SK-AUG", { gem = 1 })
+
+    ledger.apply_augment_item(state, "I-AUG2", "SK-AUG", "I-BASE2", {
+      fee_gold = 25
+    })
+
+    assert.are.equal(1, inventory.get_qty(state.inventory, "gem"))
+    assert.are.equal(165, state.crafted_items["I-AUG2"].operational_cost_gold)
+    assert.are.equal("I-BASE2", state.crafted_items["I-AUG2"].parent_item_id)
+  end)
 end)

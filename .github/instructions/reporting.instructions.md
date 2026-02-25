@@ -21,6 +21,7 @@ GENERAL REQUIREMENTS
    - Design capital remaining > 0 (for recovery-enabled design sources)
    - Pattern capital remaining > 0 (for recovery-enabled design sources linked to pools)
    - Estimated materials used (if present)
+   - External items with basis_source mtm or unknown
 4) Reports must display provenance + recovery_enabled for design sources.
 
 Implementation:
@@ -80,6 +81,19 @@ Behavior:
 
 Content:
 Same rollups as overall report, but restricted to that year.
+
+Process losses attribution for year report:
+- resolved_year for PROCESS_WRITE_OFF must be determined in order:
+   1) payload.game_time.year
+   2) PROCESS_SET_GAME_TIME override with scope="write_off"
+   3) PROCESS_SET_GAME_TIME override with scope="all"
+   4) otherwise unattributed (excluded from year activity totals)
+
+If unattributed process write-offs exist:
+- Do not spam warnings by default.
+- Include concise note in report body:
+   "Note: N process write-offs are not attributed to a game year. Use 'adex process list --needs-year' and 'adex process set-year ...' to fix."
+- Explicit warning list should be shown only in verbose mode.
 
 Holdings snapshot (current as-of now):
 - Inventory value (WAC)
@@ -160,6 +174,10 @@ If sold:
 If unsold:
 - show operational_cost_gold as unsold basis
 
+For external items:
+- show basis_gold as item basis
+- if sold, compute per-item P&L using basis_gold
+
 No global holdings.
 
 ------------------------------------------------------------
@@ -170,13 +188,15 @@ Definitions:
 - Inventory value (WAC): sum(qty_on_hand * wac_unit_cost)
 - WIP: sum(committed input basis + committed fees) for in-flight processes
 - Unsold items value: sum(operational_cost_gold) for crafted_items not yet sold (optional)
+- External items holdings: sum(basis_gold) for external_items where status='active'
 
 Which reports include holdings:
 A) Overall report: MUST include inventory + WIP + unsold + process losses line and true profit reduced by losses.
-B) Year report: MUST include year activity + current holdings snapshot.
-C) Order report: MUST NOT include global holdings.
-D) Design report: MUST include design-scoped unsold items value; no global inventory.
-E) Item report: MUST show unsold basis if unsold; no global inventory.
+B) Overall report MUST also include external items holdings.
+C) Year report: MUST include year activity + current holdings snapshot.
+D) Order report: MUST NOT include global holdings.
+E) Design report: MUST include design-scoped unsold items value; no global inventory.
+F) Item report: MUST show unsold basis if unsold; no global inventory.
 
 Warnings:
 - If holdings component cannot be computed (e.g., missing WAC), emit WARNING.

@@ -24,7 +24,7 @@ Rules:
      - at least one example invocation
 2) Provide additional scoped help:
    - `adex help <topic>` where topic in:
-     inv, broker, pattern, design, process, craft, sell, report, order, sim, price, list, maintenance, config
+  inv, broker, pattern, design, item, process, craft, sell, report, order, sim, price, list, maintenance, config
 3) Help text must be stable, concise, and actionable.
 
 ------------------------------------------------------------
@@ -76,8 +76,11 @@ Rules:
   - filters: --type, --provenance, --recovery
 
 - `adex list items`
-  - item_id, source_id (or unresolved), appearance_key, crafted_at, sold?(yes/no)
+  - item_id, kind(crafted|external), source_id(or external), appearance/name, created/acquired_at, sold?(yes/no)
   - filters: --source <source_id>, --sold 0|1, --unresolved 1
+
+- `adex item add [<item_id>] <name> <basis_gold> [--basis purchase|mtm|gift|unknown] [--note <text>]`
+  - registers external items with explicit basis for later augmentation/sale attribution
 
 - `adex list sales`
   - sale_id, item_id, sold_at, sale_price, game_year (if known), order_id/settlement_id (if linked)
@@ -89,6 +92,12 @@ Rules:
 - `adex list processes`
   - process_instance_id, process_id, status, started_at, completed_at
   - filters: --status, --process
+
+- `adex process list --needs-year`
+  - lists PROCESS_WRITE_OFF entries with unresolved game-year attribution
+
+- `adex process set-year <process_instance_id> <year> [--scope write_off|start|complete|abort|all] [--note <text>]`
+  - records PROCESS_SET_GAME_TIME correction event (no history rewrite)
 
 2) Lists must be concise and readable in Mudlet; stable enough to copy IDs from.
 

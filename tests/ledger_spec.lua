@@ -98,6 +98,24 @@ describe("Ledger Core", function()
       assert.are.equal(75, profit)
       assert.are.equal(5, inventory.get_qty(state.inventory, "leather"))
     end)
+
+    it("can attach commodity sale to an order", function()
+      local store = memory_store.new()
+      local state = ledger.new(store)
+
+      ledger.apply_opening_inventory(state, "leather", 10, 20)
+      ledger.apply_order_create(state, "O-C1", "Customer", "")
+
+      local _, profit = ledger.apply_broker_sell(state, "leather", 2, 35, {
+        sale_id = "CS1",
+        order_id = "O-C1"
+      })
+
+      assert.are.equal(30, profit)
+      assert.are.equal(8, inventory.get_qty(state.inventory, "leather"))
+      assert.are.equal(70, state.commodity_sales["CS1"].revenue)
+      assert.is_true(state.order_commodity_sales["O-C1"]["CS1"])
+    end)
   end)
   
   describe("TEST 2 - GENERIC PROCESS_APPLY", function()

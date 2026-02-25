@@ -213,7 +213,7 @@ end
 
 local function render_totals(render, totals)
   local fmt = render.format_gold or tostring
-  render.kv_block({
+  local rows = {
     { label = "Revenue", value = fmt(totals.revenue or 0) },
     { label = "Operational cost", value = fmt(totals.operational_cost or 0) },
     { label = "Operational profit", value = fmt(totals.operational_profit or 0) },
@@ -221,7 +221,14 @@ local function render_totals(render, totals)
     { label = "Applied to pattern capital", value = fmt(totals.applied_to_pattern_capital or 0) },
     { label = "Process losses", value = fmt(totals.process_losses or 0) },
     { label = "True profit", value = fmt(totals.true_profit or 0) }
-  })
+  }
+  if totals.process_losses_attributed ~= nil then
+    table.insert(rows, { label = "Process losses attributed", value = fmt(totals.process_losses_attributed) })
+  end
+  if totals.process_losses_unattributed ~= nil then
+    table.insert(rows, { label = "Process losses unattributed", value = fmt(totals.process_losses_unattributed) })
+  end
+  render.kv_block(rows)
 end
 
 local function render_holdings(render, holdings)
@@ -241,6 +248,9 @@ local function render_holdings(render, holdings)
   end
   if holdings.unsold_items_value ~= nil then
     table.insert(rows, { label = "Unsold crafted items value", value = fmt(holdings.unsold_items_value) })
+  end
+  if holdings.external_items_holdings ~= nil then
+    table.insert(rows, { label = "External items holdings", value = fmt(holdings.external_items_holdings) })
   end
   if holdings.process_losses ~= nil then
     table.insert(rows, { label = "Process losses", value = fmt(holdings.process_losses) })
@@ -273,11 +283,15 @@ local help_topics = {
   },
   broker = {
     title = "Broker",
-    purpose = "Broker buy inventory at price.",
+    purpose = "Record commodity buys/sells at market price.",
     commands = {
       {
         usage = "adex broker buy <commodity> <qty> <unit_cost>",
         example = "adex broker buy leather 5 40"
+      },
+      {
+        usage = "adex broker sell <commodity> <qty> <unit_price> [--order <order_id>] [--sale <sale_id>]",
+        example = "adex broker sell leather 5 35 --order O-20260215-0001"
       }
     }
   },
@@ -408,6 +422,14 @@ local help_topics = {
       {
         usage = "adex process abort <process_instance_id> [--returned k=v,...] [--lost k=v,...] [--outputs k=v,...] [--note <text>]",
         example = "adex process abort X-20260215-0001"
+      },
+      {
+        usage = "adex process list --needs-year",
+        example = "adex process list --needs-year"
+      },
+      {
+        usage = "adex process set-year <process_instance_id> <year> [--scope write_off|start|complete|abort|all] [--note <text>]",
+        example = "adex process set-year X-20260215-0001 998 --scope write_off"
       }
     }
   },
@@ -480,12 +502,16 @@ local help_topics = {
         example = "adex report overall"
       },
       {
-        usage = "adex report year <year|current>",
+        usage = "adex report year <year|current> [--verbose]",
         example = "adex report year current"
       },
       {
         usage = "adex report order <order_id>",
         example = "adex report order O-20260215-0001"
+      },
+      {
+        usage = "adex report process <process_instance_id>",
+        example = "adex report process X-20260215-0001"
       },
       {
         usage = "adex report design <design_id> [--items] [--orders] [--year <year>]",
@@ -528,7 +554,7 @@ local help_topics = {
         example = "adex list sources --kind skill"
       },
       {
-        usage = "adex list items [--source <design_id>] [--sold 0|1] [--unresolved 1]",
+        usage = "adex list items [--source <design_id>] [--sold 0|1] [--transformed 0|1] [--unresolved 1]",
         example = "adex list items --unresolved 1"
       },
       {
@@ -546,6 +572,16 @@ local help_topics = {
       {
         usage = "adex list forge [--status in_flight|closed|expired] [--source <source_id>]",
         example = "adex list forge --status in_flight"
+      }
+    }
+  },
+  item = {
+    title = "Item",
+    purpose = "Register and maintain external (non-crafted) items with explicit basis.",
+    commands = {
+      {
+        usage = "adex item add [<item_id>] <name> <basis_gold> [--basis purchase|mtm|gift|unknown] [--note <text>]",
+        example = "adex item add ring_of_stars \"a ring of stars\" 3500 --basis purchase"
       }
     }
   },
@@ -638,7 +674,7 @@ function commands.help(topic)
     })
 
     render.section("Topics")
-    local order = { "inv", "broker", "pattern", "design", "source", "order", "process", "craft", "forge", "augment", "sell", "report", "list", "price", "sim", "config", "maintenance" }
+    local order = { "inv", "broker", "pattern", "design", "source", "item", "order", "process", "craft", "forge", "augment", "sell", "report", "list", "price", "sim", "config", "maintenance" }
     local rows = {}
     for _, topic_name in ipairs(order) do
       local entry = help_topics[topic_name]
@@ -664,7 +700,7 @@ function commands.help(topic)
   out_plain("  operational cost: material WAC + fees + time cost per item")
   out_plain("  true profit: profit after design and pattern capital recovery")
   out_plain("Commands:")
-  local order = { "inv", "broker", "pattern", "design", "source", "order", "process", "craft", "forge", "augment", "sell", "report", "list", "price", "sim", "config", "maintenance" }
+  local order = { "inv", "broker", "pattern", "design", "source", "item", "order", "process", "craft", "forge", "augment", "sell", "report", "list", "price", "sim", "config", "maintenance" }
   for _, topic_name in ipairs(order) do
     local entry = help_topics[topic_name]
     if entry then
@@ -778,6 +814,7 @@ function commands.handle(input)
       { label = "Production sources", value = tostring(counts.production_sources or 0) },
       { label = "Designs (legacy)", value = tostring(counts.designs or 0) },
       { label = "Pattern pools", value = tostring(counts.pattern_pools or 0) },
+      { label = "External items", value = tostring(counts.external_items or 0) },
       { label = "Crafted items", value = tostring(counts.crafted_items or 0) },
       { label = "Forge sessions", value = tostring(counts.forge_sessions or 0) },
       { label = "Forge session items", value = tostring(counts.forge_session_items or 0) },
@@ -814,6 +851,34 @@ function commands.handle(input)
       return
     end
     ledger.apply_broker_buy(state, commodity, qty, unit_cost)
+    out("OK")
+    return
+  end
+
+  if cmd == "broker" and tokens[2] == "sell" then
+    local commodity = tokens[3]
+    local qty = tonumber(tokens[4])
+    local unit_price = tonumber(tokens[5])
+    local args, flags = parse_flags(tokens, 6)
+    if not commodity or not qty or not unit_price then
+      error_out("usage: adex broker sell <commodity> <qty> <unit_price> [--order <order_id>] [--sale <sale_id>]")
+      return
+    end
+
+    local order_id = flags.order
+    local sale_id = flags.sale
+    if order_id and not sale_id then
+      sale_id = id_generator.generate("CS", function(id)
+        return state.commodity_sales and state.commodity_sales[id] ~= nil
+      end)
+      out("created_id: " .. tostring(sale_id))
+    end
+
+    local _, profit = ledger.apply_broker_sell(state, commodity, qty, unit_price, {
+      sale_id = sale_id,
+      order_id = order_id
+    })
+    out("profit: " .. tostring(profit))
     out("OK")
     return
   end
@@ -1373,6 +1438,47 @@ function commands.handle(input)
     return
   end
 
+  if cmd == "item" and tokens[2] == "add" then
+    local args, flags = parse_flags(tokens, 3)
+    local item_id = nil
+    local name = nil
+    local basis_gold = nil
+
+    if #args == 3 then
+      item_id = args[1]
+      name = args[2]
+      basis_gold = tonumber(args[3])
+    elseif #args == 2 then
+      name = args[1]
+      basis_gold = tonumber(args[2])
+    else
+      error_out("usage: adex item add [<item_id>] <name> <basis_gold> [--basis purchase|mtm|gift|unknown] [--note <text>]")
+      return
+    end
+
+    if not name or not basis_gold or basis_gold < 0 then
+      error_out("usage: adex item add [<item_id>] <name> <basis_gold> [--basis purchase|mtm|gift|unknown] [--note <text>]")
+      return
+    end
+
+    if not item_id then
+      item_id = id_generator.generate("I", function(id)
+        return state.crafted_items[id] ~= nil or (state.external_items and state.external_items[id] ~= nil)
+      end)
+      out("created_id: " .. tostring(item_id))
+    end
+
+    local basis_source = flags.basis or "unknown"
+    if basis_source ~= "purchase" and basis_source ~= "mtm" and basis_source ~= "gift" and basis_source ~= "unknown" then
+      error_out("--basis must be one of purchase|mtm|gift|unknown")
+      return
+    end
+
+    ledger.apply_item_add_external(state, item_id, name, basis_gold, basis_source, flags.note)
+    out("OK")
+    return
+  end
+
   if cmd == "order" and tokens[2] == "create" then
     local args, flags = parse_flags(tokens, 3)
     local order_id = args[1]
@@ -1476,7 +1582,54 @@ function commands.handle(input)
       error_out("usage: adex process apply <process_id> --inputs k=v,... --outputs k=v,... [--fee <gold>] [--note <text>]")
       return
     end
-    ledger.apply_process(state, process_id, inputs, outputs, fee)
+    local game_time = get_game_time()
+    ledger.apply_process(state, process_id, inputs, outputs, fee, game_time)
+    out("OK")
+    return
+  end
+
+  if cmd == "process" and tokens[2] == "list" then
+    local args, flags = parse_flags(tokens, 3)
+    if flags["needs-year"] then
+      local reports = _G.AchaeadexLedger.Core.Reports
+      if not reports then
+        error_out("reports module not loaded")
+        return
+      end
+      local rows = reports.process_write_offs_needing_year(state)
+      render.section("Process Write-offs Missing Year")
+      local display_rows = {}
+      for _, row in ipairs(rows) do
+        table.insert(display_rows, {
+          process_instance_id = row.process_instance_id,
+          at = row.at or "",
+          amount_gold = render.format_gold and render.format_gold(row.amount_gold) or tostring(row.amount_gold)
+        })
+      end
+      render.table(display_rows, {
+        { key = "process_instance_id", label = "Process", nowrap = true, min = 12 },
+        { key = "at", label = "At", nowrap = true, min = 20 },
+        { key = "amount_gold", label = "Amount", align = "right", min = 8 }
+      })
+      return
+    end
+    error_out("usage: adex process list --needs-year")
+    return
+  end
+
+  if cmd == "process" and tokens[2] == "set-year" then
+    local process_instance_id = tokens[3]
+    local year = tonumber(tokens[4])
+    local args, flags = parse_flags(tokens, 5)
+    local scope = flags.scope or "write_off"
+    local note = flags.note
+    if not process_instance_id or not year then
+      error_out("usage: adex process set-year <process_instance_id> <year> [--scope write_off|start|complete|abort|all] [--note <text>]")
+      return
+    end
+
+    local game_time = { year = year }
+    ledger.apply_process_set_game_time(state, process_instance_id, game_time, scope, note)
     out("OK")
     return
   end
@@ -1506,7 +1659,8 @@ function commands.handle(input)
       end)
       out("created_id: " .. tostring(process_instance_id))
     end
-    ledger.apply_process_start(state, process_instance_id, process_id, inputs, fee, note)
+    local game_time = get_game_time()
+    ledger.apply_process_start(state, process_instance_id, process_id, inputs, fee, note, game_time)
     out("OK")
     return
   end
@@ -1520,7 +1674,8 @@ function commands.handle(input)
       error_out("usage: adex process add-inputs <process_instance_id> --inputs k=v,... [--note <text>]")
       return
     end
-    ledger.apply_process_add_inputs(state, process_instance_id, inputs, note)
+    local game_time = get_game_time()
+    ledger.apply_process_add_inputs(state, process_instance_id, inputs, note, game_time)
     out("OK")
     return
   end
@@ -1534,7 +1689,8 @@ function commands.handle(input)
       error_out("usage: adex process add-fee <process_instance_id> --fee <gold> [--note <text>]")
       return
     end
-    ledger.apply_process_add_fee(state, process_instance_id, fee, note)
+    local game_time = get_game_time()
+    ledger.apply_process_add_fee(state, process_instance_id, fee, note, game_time)
     out("OK")
     return
   end
@@ -1548,7 +1704,8 @@ function commands.handle(input)
       error_out("usage: adex process complete <process_instance_id> [--outputs k=v,...] [--note <text>]")
       return
     end
-    ledger.apply_process_complete(state, process_instance_id, outputs, note)
+    local game_time = get_game_time()
+    ledger.apply_process_complete(state, process_instance_id, outputs, note, game_time)
     out("OK")
     return
   end
@@ -1564,11 +1721,12 @@ function commands.handle(input)
       error_out("usage: adex process abort <process_instance_id> [--returned k=v,...] [--lost k=v,...] [--outputs k=v,...] [--note <text>]")
       return
     end
+    local game_time = get_game_time()
     ledger.apply_process_abort(state, process_instance_id, {
       returned = returned,
       lost = lost,
       outputs = outputs
-    }, note)
+    }, note, game_time)
     out("OK")
     return
   end
@@ -1742,14 +1900,25 @@ function commands.handle(input)
     local fmt = render.format_gold or tostring
 
     render.section("Item Report")
-    render.kv_block({
-      { label = "Item", value = report.item_id },
-      { label = "Design", value = report.design_id or "(unresolved)" },
-      { label = "Provenance", value = report.provenance or "unknown" },
-      { label = "Base operational cost", value = fmt(report.base_operational_cost_gold or report.operational_cost_gold) },
-      { label = "Allocated forge share", value = fmt(report.forge_allocated_coal_gold or 0) },
-      { label = "Operational cost", value = fmt(report.operational_cost_gold) }
-    })
+    if report.source_kind == "external" then
+      render.kv_block({
+        { label = "Item", value = report.item_id },
+        { label = "Kind", value = "external" },
+        { label = "Name", value = report.external_name or "" },
+        { label = "Basis source", value = report.external_basis_source or "unknown" },
+        { label = "Status", value = report.external_status or "active" },
+        { label = "Basis", value = fmt(report.operational_cost_gold) }
+      })
+    else
+      render.kv_block({
+        { label = "Item", value = report.item_id },
+        { label = "Design", value = report.design_id or "(unresolved)" },
+        { label = "Provenance", value = report.provenance or "unknown" },
+        { label = "Base operational cost", value = fmt(report.base_operational_cost_gold or report.operational_cost_gold) },
+        { label = "Allocated forge share", value = fmt(report.forge_allocated_coal_gold or 0) },
+        { label = "Operational cost", value = fmt(report.operational_cost_gold) }
+      })
+    end
 
     if report.pending_forge_allocation then
       render.warning("WARNING: pending forge session allocation for " .. tostring(report.pending_forge_session_id or "unknown session"))
@@ -1919,9 +2088,11 @@ function commands.handle(input)
 
     if topic == "items" then
       local sold = flags.sold and tonumber(flags.sold)
+      local transformed = flags.transformed and tonumber(flags.transformed)
       local rows = listings.list_items(state, {
         source = flags.source or flags.design,
         sold = sold == nil and nil or sold == 1,
+        transformed = transformed == nil and nil or transformed == 1,
         unresolved = flags.unresolved and tonumber(flags.unresolved) == 1
       })
       render.section("Items")
@@ -1929,15 +2100,17 @@ function commands.handle(input)
       for _, row in ipairs(rows) do
         table.insert(display_rows, {
           item_id = row.item_id,
+          kind = row.item_kind or "crafted",
           design_id = row.design_id or "(unresolved)",
-          sold = row.sold and "yes" or "no",
+          status = row.status or (row.sold and "sold" or "active"),
           appearance_key = row.appearance_key or ""
         })
       end
       render.table(display_rows, {
         { key = "item_id", label = "Item ID", nowrap = true, min = 12 },
+        { key = "kind", label = "Kind", nowrap = true, min = 8 },
         { key = "design_id", label = "Design", nowrap = true, min = 10 },
-        { key = "sold", label = "Sold", nowrap = true, min = 4 },
+        { key = "status", label = "Status", nowrap = true, min = 11 },
         { key = "appearance_key", label = "Appearance", min = 14 }
       })
       return
@@ -2084,8 +2257,9 @@ function commands.handle(input)
     end
 
     local year_token = tokens[3]
+    local args, flags = parse_flags(tokens, 4)
     if not year_token then
-      error_out("usage: adex report year <year|current>")
+      error_out("usage: adex report year <year|current> [--verbose]")
       return
     end
 
@@ -2100,16 +2274,22 @@ function commands.handle(input)
     end
 
     if not year then
-      error_out("usage: adex report year <year|current>")
+      error_out("usage: adex report year <year|current> [--verbose]")
       return
     end
 
-    local report = reports.year(state, year, { time_cost_per_hour = config.get_time_cost_per_hour and config.get_time_cost_per_hour() or 0 })
+    local report = reports.year(state, year, {
+      time_cost_per_hour = config.get_time_cost_per_hour and config.get_time_cost_per_hour() or 0,
+      verbose = flags.verbose and true or false
+    })
     render.section("Year Report: " .. tostring(year))
     render.section("Year Activity")
     render_totals(render, report.totals)
     render.section("Holdings Snapshot")
     render_holdings(render, report.holdings)
+    if report.note then
+      render.print(report.note)
+    end
     render_warnings(render, report.warnings)
     return
   end
@@ -2143,11 +2323,15 @@ function commands.handle(input)
     render.section("Line Items")
     local rows = {}
     for _, sale in ipairs(report.sales) do
+      local kind = sale.item_kind or "crafted"
+      local ref_id = sale.item_id or sale.commodity or ""
+      local description = sale.appearance_key or ""
       table.insert(rows, {
         sale_id = sale.sale_id,
-        item_id = sale.item_id,
+        kind = kind,
+        item_id = ref_id,
         design_id = sale.design_id or "(unresolved)",
-        appearance = sale.appearance_key or "",
+        appearance = description,
         sale_price = fmt(sale.sale_price_gold),
         operational_cost = fmt(sale.operational_cost_gold),
         operational_profit = fmt(sale.operational_profit),
@@ -2158,9 +2342,10 @@ function commands.handle(input)
     end
     render.table(rows, {
       { key = "sale_id", label = "Sale ID", nowrap = true, min = 12 },
-      { key = "item_id", label = "Item", nowrap = true, min = 10 },
+      { key = "kind", label = "Kind", nowrap = true, min = 9 },
+      { key = "item_id", label = "Ref", nowrap = true, min = 10 },
       { key = "design_id", label = "Design", nowrap = true, min = 10 },
-      { key = "appearance", label = "Appearance", min = 12 },
+      { key = "appearance", label = "Description", min = 12 },
       { key = "sale_price", label = "Price", align = "right", min = 8 },
       { key = "operational_cost", label = "Op Cost", align = "right", min = 8 },
       { key = "operational_profit", label = "Op Profit", align = "right", min = 8 },
@@ -2175,6 +2360,78 @@ function commands.handle(input)
       render.print(report.note)
     end
     render_warnings(render, report.warnings)
+    return
+  end
+
+  if cmd == "report" and tokens[2] == "process" then
+    local reports = _G.AchaeadexLedger.Core.Reports
+    if not reports then
+      error_out("reports module not loaded")
+      return
+    end
+
+    local process_instance_id = tokens[3]
+    if not process_instance_id then
+      error_out("usage: adex report process <process_instance_id>")
+      return
+    end
+
+    local report = reports.process(state, process_instance_id)
+    local fmt = render.format_gold or tostring
+
+    local function map_rows(map)
+      local rows = {}
+      local keys = {}
+      for key in pairs(map or {}) do
+        table.insert(keys, key)
+      end
+      table.sort(keys)
+      for _, key in ipairs(keys) do
+        table.insert(rows, { commodity = key, qty = tostring(map[key] or 0) })
+      end
+      return rows
+    end
+
+    render.section("Process Report")
+    render.kv_block({
+      { label = "Process instance", value = report.process_instance_id },
+      { label = "Process id", value = report.process_id },
+      { label = "Status", value = report.status },
+      { label = "Started", value = report.started_at or "" },
+      { label = "Completed", value = report.completed_at or "" },
+      { label = "Committed input cost", value = fmt(report.committed_cost_gold) },
+      { label = "Fees", value = fmt(report.fees_gold) },
+      { label = "Total committed", value = fmt(report.total_committed_gold) },
+      { label = "Write-offs", value = fmt(report.write_off_total_gold) },
+      { label = "Note", value = report.note or "" }
+    })
+
+    render.section("Committed Inputs")
+    render.table(map_rows(report.committed_inputs), {
+      { key = "commodity", label = "Commodity", nowrap = true, min = 12 },
+      { key = "qty", label = "Qty", align = "right", min = 6 }
+    })
+
+    render.section("Outputs")
+    render.table(map_rows(report.outputs), {
+      { key = "commodity", label = "Commodity", nowrap = true, min = 12 },
+      { key = "qty", label = "Qty", align = "right", min = 6 }
+    })
+
+    if report.status == "aborted" then
+      render.section("Abort Disposition")
+      render.print("Returned")
+      render.table(map_rows(report.returned_inputs), {
+        { key = "commodity", label = "Commodity", nowrap = true, min = 12 },
+        { key = "qty", label = "Qty", align = "right", min = 6 }
+      })
+      render.print("Lost")
+      render.table(map_rows(report.lost_inputs), {
+        { key = "commodity", label = "Commodity", nowrap = true, min = 12 },
+        { key = "qty", label = "Qty", align = "right", min = 6 }
+      })
+    end
+
     return
   end
 

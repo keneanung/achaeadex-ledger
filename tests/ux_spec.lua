@@ -57,6 +57,15 @@ describe("UX helpers", function()
 
     ledger.apply_order_create(state, "O1", "Customer", "Note")
     ledger.apply_order_add_sale(state, "O1", "S1")
+    ledger.apply_broker_sell(state, "leather", 2, 35, {
+      sale_id = "CS1",
+      order_id = "O1"
+    })
+    ledger.apply_item_add_external(state, "E1", "gifted amulet", 900, "gift")
+    ledger.apply_source_create(state, "SK-AUG", "skill", "augmentation", "Augmentation")
+    ledger.apply_augment_item(state, "I2", "SK-AUG", "E1", {
+      materials = { leather = 1 }
+    })
 
     ledger.apply_process_start(state, "X1", "refine", {})
 
@@ -69,12 +78,38 @@ describe("UX helpers", function()
     assert.are.equal("D1", designs[1].design_id)
 
     local sources = listings.list_sources(state, { kind = "skill" })
-    assert.are.equal(1, #sources)
-    assert.are.equal("SK-FORGE", sources[1].source_id)
+    assert.are.equal(2, #sources)
+    local has_forge_source = false
+    for _, source in ipairs(sources) do
+      if source.source_id == "SK-FORGE" then
+        has_forge_source = true
+        break
+      end
+    end
+    assert.is_true(has_forge_source)
 
     local items = listings.list_items(state, { sold = true })
     assert.are.equal(1, #items)
     assert.are.equal("I1", items[1].item_id)
+
+    local all_items = listings.list_items(state, {})
+    local has_external = false
+    local has_transformed = false
+    for _, row in ipairs(all_items) do
+      if row.item_id == "E1" and row.item_kind == "external" then
+        has_external = true
+        if row.status == "transformed" then
+          has_transformed = true
+        end
+        break
+      end
+    end
+    assert.is_true(has_external)
+    assert.is_true(has_transformed)
+
+    local transformed_items = listings.list_items(state, { transformed = true })
+    assert.are.equal(1, #transformed_items)
+    assert.are.equal("E1", transformed_items[1].item_id)
 
     local sales = listings.list_sales(state, { year = 650 })
     assert.are.equal(1, #sales)
@@ -82,7 +117,8 @@ describe("UX helpers", function()
 
     local orders = listings.list_orders(state)
     assert.are.equal(1, #orders)
-    assert.are.equal(1, orders[1].total_sales_count)
+    assert.are.equal(2, orders[1].total_sales_count)
+    assert.are.equal(170, orders[1].total_revenue)
 
     local processes = listings.list_processes(state, { status = "in_flight" })
     assert.are.equal(1, #processes)

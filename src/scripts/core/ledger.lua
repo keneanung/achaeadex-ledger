@@ -162,17 +162,21 @@ function ledger.new(event_store)
     pattern_pools = {}, -- pattern_pool_id -> pool data
     pattern_pools_by_type = {}, -- pattern_type -> active pool id
     crafted_items = {}, -- item_id -> item data
+    external_items = {}, -- item_id -> external item data
     design_aliases = {}, -- alias_id -> source_id
     appearance_aliases = {}, -- appearance_key -> source_id
     process_instances = {}, -- process_instance_id -> process data
     sales = {}, -- sale_id -> sale data
+    commodity_sales = {}, -- sale_id -> commodity sale data
     orders = {}, -- order_id -> order data
     order_sales = {}, -- order_id -> { sale_id = true }
+    order_commodity_sales = {}, -- order_id -> { sale_id = true }
     sale_orders = {}, -- sale_id -> order_id
     order_items = {}, -- order_id -> { item_id = true }
     item_orders = {}, -- item_id -> order_id
     order_settlements = {}, -- settlement_id -> settlement data
     process_write_offs = {}, -- list of write-off entries
+    process_game_time_overrides = {}, -- process_instance_id -> { scope -> { game_time, updated_at, note } }
     forge_sessions = {}, -- forge_session_id -> session data
     forge_session_items = {}, -- forge_session_id -> { item_id -> allocated_coal_gold }
     item_transformations = {}, -- new_item_id -> transformation link
@@ -267,6 +271,23 @@ function ledger.apply_event(state, event)
   elseif event_type == "BROKER_SELL" then
     local inventory = get_inventory()
     inventory.remove(state.inventory, payload.commodity, payload.qty)
+    if payload.sale_id then
+      state.commodity_sales[payload.sale_id] = {
+        sale_id = payload.sale_id,
+        commodity = payload.commodity,
+        qty = payload.qty,
+        unit_price = payload.unit_price,
+        sold_at = payload.sold_at,
+        cost = payload.cost,
+        revenue = payload.revenue,
+        profit = payload.profit,
+        order_id = payload.order_id
+      }
+      if payload.order_id then
+        state.order_commodity_sales[payload.order_id] = state.order_commodity_sales[payload.order_id] or {}
+        state.order_commodity_sales[payload.order_id][payload.sale_id] = true
+      end
+    end
   elseif event_type == "PROCESS_APPLY" then
     local inventory = get_inventory()
     local inputs = payload.inputs or {}
@@ -312,10 +333,22 @@ function ledger.apply_event(state, event)
     state.process_write_offs = state.process_write_offs or {}
     table.insert(state.process_write_offs, {
       process_instance_id = payload.process_instance_id,
+      at = event.ts,
       amount_gold = payload.amount_gold or 0,
       reason = payload.reason,
-      note = payload.note
+      note = payload.note,
+      game_time = payload.game_time
     })
+    return state
+  elseif event_type == "PROCESS_SET_GAME_TIME" then
+    local scope = payload.scope or "write_off"
+    state.process_game_time_overrides = state.process_game_time_overrides or {}
+    state.process_game_time_overrides[payload.process_instance_id] = state.process_game_time_overrides[payload.process_instance_id] or {}
+    state.process_game_time_overrides[payload.process_instance_id][scope] = {
+      game_time = payload.game_time,
+      updated_at = event.ts,
+      note = payload.note
+    }
     return state
   elseif event_type == "FORGE_WRITE_OFF" then
     state.process_write_offs = state.process_write_offs or {}
@@ -446,6 +479,43 @@ function ledger.apply_event(state, event)
     end
     order.status = payload.status or order.status
     order.closed_at = payload.closed_at
+  elseif event_type == "ITEM_REGISTER_EXTERNAL" then
+    if state.crafted_items[payload.item_id] then
+      error("Item " .. tostring(payload.item_id) .. " already exists as crafted item")
+    end
+    local existing = state.external_items[payload.item_id]
+    if existing then
+      error("External item " .. tostring(payload.item_id) .. " already exists")
+    end
+    state.external_items[payload.item_id] = {
+      item_id = payload.item_id,
+      name = payload.name,
+      acquired_at = payload.acquired_at,
+      basis_gold = payload.basis_gold,
+      basis_source = payload.basis_source,
+      status = payload.status or "active",
+      note = payload.note
+    }
+  elseif event_type == "ITEM_UPDATE_EXTERNAL" then
+    local item = state.external_items[payload.item_id]
+    if not item then
+      error("External item " .. tostring(payload.item_id) .. " not found")
+    end
+    if payload.name ~= nil then
+      item.name = payload.name
+    end
+    if payload.basis_gold ~= nil then
+      item.basis_gold = payload.basis_gold
+    end
+    if payload.basis_source ~= nil then
+      item.basis_source = payload.basis_source
+    end
+    if payload.status ~= nil then
+      item.status = payload.status
+    end
+    if payload.note ~= nil then
+      item.note = payload.note
+    end
   elseif event_type == "CRAFT_ITEM" then
     local source_id, source_kind = normalize_source_payload(payload)
     local bom = payload.materials
@@ -492,11 +562,19 @@ function ledger.apply_event(state, event)
     end
 
     local item = state.crafted_items[payload.item_id]
-    if not item then
-      error("Crafted item " .. payload.item_id .. " not found")
-    end
-    if not item.source_id then
-      error("Crafted item " .. payload.item_id .. " design is unresolved")
+    local external_item = nil
+    local item_basis = nil
+    if item then
+      if not item.source_id then
+        error("Crafted item " .. payload.item_id .. " design is unresolved")
+      end
+      item_basis = item.operational_cost_gold
+    else
+      external_item = state.external_items[payload.item_id]
+      if not external_item then
+        error("Item " .. payload.item_id .. " not found")
+      end
+      item_basis = external_item.basis_gold or 0
     end
 
     local sale = {
@@ -509,13 +587,31 @@ function ledger.apply_event(state, event)
     }
     state.sales[payload.sale_id] = sale
 
-    local operational_profit = payload.sale_price_gold - item.operational_cost_gold
-    local result = get_recovery().apply_to_state(state, item.source_id, operational_profit)
-    sale.operational_profit = result.operational_profit
-    sale.applied_to_design_capital = result.applied_to_design_capital
-    sale.applied_to_pattern_capital = result.applied_to_pattern_capital
-    sale.true_profit = result.true_profit
-    return result
+    local operational_profit = payload.sale_price_gold - item_basis
+    if item and item.source_id then
+      local result = get_recovery().apply_to_state(state, item.source_id, operational_profit)
+      sale.operational_profit = result.operational_profit
+      sale.applied_to_design_capital = result.applied_to_design_capital
+      sale.applied_to_pattern_capital = result.applied_to_pattern_capital
+      sale.true_profit = result.true_profit
+      return result
+    end
+
+    if external_item then
+      external_item.status = "sold"
+      sale.operational_profit = operational_profit
+      sale.applied_to_design_capital = 0
+      sale.applied_to_pattern_capital = 0
+      sale.true_profit = operational_profit
+      return {
+        operational_profit = operational_profit,
+        applied_to_design_capital = 0,
+        applied_to_pattern_capital = 0,
+        true_profit = operational_profit,
+        design_remaining = 0,
+        pattern_remaining = 0
+      }
+    end
   elseif event_type == "FORGE_FIRE" then
     local inventory = get_inventory()
     local coal_basis = payload.coal_basis_gold or 0
@@ -591,8 +687,18 @@ function ledger.apply_event(state, event)
     end
   elseif event_type == "AUGMENT_ITEM" then
     local inventory = get_inventory()
-    local target_item = state.crafted_items[payload.target_item_id]
-    if not target_item then
+    local target_kind = payload.target_item_kind or "crafted"
+    local target_item = nil
+    local target_external = nil
+    if target_kind == "crafted" then
+      target_item = state.crafted_items[payload.target_item_id]
+    elseif target_kind == "external" then
+      target_external = state.external_items[payload.target_item_id]
+    else
+      target_item = state.crafted_items[payload.target_item_id]
+      target_external = state.external_items[payload.target_item_id]
+    end
+    if not target_item and not target_external then
       error("Target item " .. tostring(payload.target_item_id) .. " not found")
     end
     local source_id = resolve_source_id(state, payload.source_id)
@@ -606,7 +712,12 @@ function ledger.apply_event(state, event)
       inventory.remove(state.inventory, commodity, qty)
     end
 
-    target_item.transformed = 1
+    if target_item then
+      target_item.transformed = 1
+    end
+    if target_external then
+      target_external.status = "transformed"
+    end
 
     state.crafted_items[payload.new_item_id] = {
       item_id = payload.new_item_id,
@@ -661,7 +772,11 @@ function ledger.apply_broker_buy(state, commodity, qty, unit_cost)
 end
 
 -- Process BROKER_SELL event
-function ledger.apply_broker_sell(state, commodity, qty, unit_price)
+function ledger.apply_broker_sell(state, commodity, qty, unit_price, opts)
+  opts = opts or {}
+  if opts.order_id and not state.orders[opts.order_id] then
+    error("Order " .. tostring(opts.order_id) .. " not found")
+  end
   local inventory = get_inventory()
   local cost = inventory.get_unit_cost(state.inventory, commodity) * qty
   local revenue = qty * unit_price
@@ -673,7 +788,10 @@ function ledger.apply_broker_sell(state, commodity, qty, unit_price)
     unit_price = unit_price,
     cost = cost,
     revenue = revenue,
-    profit = profit
+    profit = profit,
+    sale_id = opts.sale_id,
+    sold_at = opts.sold_at or os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    order_id = opts.order_id
   })
 
   ledger.apply_event(state, event)
@@ -682,12 +800,13 @@ function ledger.apply_broker_sell(state, commodity, qty, unit_price)
 end
 
 -- Process immediate PROCESS_APPLY event
-function ledger.apply_process(state, process_id, inputs, outputs, gold_fee)
+function ledger.apply_process(state, process_id, inputs, outputs, gold_fee, game_time)
   local event = ledger.record_event(state, "PROCESS_APPLY", {
     process_id = process_id,
     inputs = inputs,
     outputs = outputs,
-    gold_fee = gold_fee or 0
+    gold_fee = gold_fee or 0,
+    game_time = game_time
   })
 
   ledger.apply_event(state, event)
@@ -1295,19 +1414,43 @@ end
 function ledger.apply_augment_item(state, new_item_id, source_id, target_item_id, opts)
   opts = opts or {}
   local resolved_source_id = ensure_source_or_stub(state, source_id, "skill", "augmentation")
+  local source = state.production_sources[resolved_source_id]
+  if not source then
+    error("Augmentation source " .. tostring(resolved_source_id) .. " not found")
+  end
   local target_item = state.crafted_items[target_item_id]
-  if not target_item then
+  local target_external = state.external_items[target_item_id]
+  if not target_item and not target_external then
     error("Target item " .. tostring(target_item_id) .. " not found")
   end
 
-  local materials = opts.materials or {}
+  local materials = opts.materials
+  local materials_source = nil
+  if materials and next(materials) ~= nil then
+    materials_source = "explicit"
+  elseif source.bom and next(source.bom) ~= nil then
+    materials = source.bom
+    materials_source = "design_bom"
+  else
+    materials = {}
+    materials_source = "manual"
+  end
+
   local materials_cost = 0
   if next(materials) ~= nil then
     materials_cost = compute_material_cost(state, materials)
   end
   local fee = opts.fee_gold or 0
   local time_cost = opts.time_cost_gold or 0
-  local parent_basis = target_item.operational_cost_gold or 0
+  local parent_basis = 0
+  local target_item_kind = "crafted"
+  if target_item then
+    parent_basis = target_item.operational_cost_gold or 0
+    target_item_kind = "crafted"
+  else
+    parent_basis = target_external.basis_gold or 0
+    target_item_kind = "external"
+  end
   local operational_cost = parent_basis + materials_cost + fee + time_cost
 
   local breakdown = {
@@ -1328,9 +1471,10 @@ function ledger.apply_augment_item(state, new_item_id, source_id, target_item_id
     source_kind = "skill",
     source_type = "augmentation",
     target_item_id = target_item_id,
+    target_item_kind = target_item_kind,
     transform_kind = "augmentation",
     materials = materials,
-    materials_source = next(materials) ~= nil and "explicit" or "manual",
+    materials_source = materials_source,
     materials_cost_gold = materials_cost,
     fee_gold = fee,
     time_cost_gold = time_cost,
@@ -1357,6 +1501,35 @@ function ledger.apply_craft_resolve(state, item_id, design_id, reason)
 
   ledger.apply_event(state, event)
 
+  return state
+end
+
+function ledger.apply_item_add_external(state, item_id, name, basis_gold, basis_source, note, acquired_at)
+  local event = ledger.record_event(state, "ITEM_REGISTER_EXTERNAL", {
+    item_id = item_id,
+    name = name,
+    basis_gold = basis_gold,
+    basis_source = basis_source or "unknown",
+    acquired_at = acquired_at or os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    status = "active",
+    note = note
+  })
+
+  ledger.apply_event(state, event)
+
+  return state
+end
+
+function ledger.apply_item_update_external(state, item_id, fields)
+  fields = fields or {}
+  local payload = { item_id = item_id }
+  payload.name = fields.name
+  payload.basis_gold = fields.basis_gold
+  payload.basis_source = fields.basis_source
+  payload.status = fields.status
+  payload.note = fields.note
+  local event = ledger.record_event(state, "ITEM_UPDATE_EXTERNAL", payload)
+  ledger.apply_event(state, event)
   return state
 end
 
@@ -1579,8 +1752,12 @@ end
 
 function ledger.report_item(state, item_id)
   local item = state.crafted_items[item_id]
+  local external = nil
   if not item then
-    error("Crafted item " .. item_id .. " not found")
+    external = state.external_items[item_id]
+    if not external then
+      error("Item " .. item_id .. " not found")
+    end
   end
 
   local sale = nil
@@ -1591,26 +1768,58 @@ function ledger.report_item(state, item_id)
     end
   end
 
-  local source = item.source_id and state.production_sources[item.source_id] or nil
+  local source = item and item.source_id and state.production_sources[item.source_id] or nil
   local pattern_pool = nil
   if source and source.pattern_pool_id then
     pattern_pool = state.pattern_pools[source.pattern_pool_id]
   end
 
+  local is_external = (item == nil)
+  local report_design_id = nil
+  local report_source_id = nil
+  local report_source_kind = "external"
+  local report_appearance = nil
+  local report_operational_cost = external and external.basis_gold or 0
+  local report_base_cost = report_operational_cost
+  local report_forge_alloc = 0
+  local report_pending_forge = false
+  local report_pending_session = nil
+  local report_transformed = (external and external.status == "transformed") or false
+  local report_parent_item = nil
+  local report_breakdown = "{}"
+
+  if not is_external then
+    report_design_id = item.source_id
+    report_source_id = item.source_id
+    report_source_kind = item.source_kind
+    report_appearance = item.appearance_key
+    report_operational_cost = item.operational_cost_gold
+    report_base_cost = item_base_cost(item)
+    report_forge_alloc = item.forge_allocated_coal_gold or 0
+    report_pending_forge = item.pending_forge_session_id ~= nil
+    report_pending_session = item.pending_forge_session_id
+    report_transformed = item.transformed == 1
+    report_parent_item = item.parent_item_id
+    report_breakdown = item.cost_breakdown_json
+  end
+
   local report = {
     item_id = item_id,
-    design_id = item.source_id,
-    source_id = item.source_id,
-    source_kind = item.source_kind,
-    appearance_key = item.appearance_key,
-    operational_cost_gold = item.operational_cost_gold,
-    base_operational_cost_gold = item_base_cost(item),
-    forge_allocated_coal_gold = item.forge_allocated_coal_gold or 0,
-    pending_forge_allocation = item.pending_forge_session_id ~= nil,
-    pending_forge_session_id = item.pending_forge_session_id,
-    transformed = item.transformed == 1,
-    parent_item_id = item.parent_item_id,
-    cost_breakdown_json = item.cost_breakdown_json,
+    design_id = report_design_id,
+    source_id = report_source_id,
+    source_kind = report_source_kind,
+    appearance_key = report_appearance,
+    operational_cost_gold = report_operational_cost,
+    base_operational_cost_gold = report_base_cost,
+    forge_allocated_coal_gold = report_forge_alloc,
+    pending_forge_allocation = report_pending_forge,
+    pending_forge_session_id = report_pending_session,
+    transformed = report_transformed,
+    parent_item_id = report_parent_item,
+    cost_breakdown_json = report_breakdown,
+    external_name = external and external.name or nil,
+    external_basis_source = external and external.basis_source or nil,
+    external_status = external and external.status or nil,
     sale_id = sale and sale.sale_id or nil,
     sale_price_gold = sale and sale.sale_price_gold or nil,
     provenance = source and source.provenance or nil,
@@ -1618,19 +1827,24 @@ function ledger.report_item(state, item_id)
     pattern_remaining = pattern_pool and pattern_pool.capital_remaining_gold or nil
   }
 
-  if sale and item.source_id then
+  if sale and item and item.source_id then
     report.operational_profit = sale.operational_profit
     report.applied_to_design_capital = sale.applied_to_design_capital
     report.applied_to_pattern_capital = sale.applied_to_pattern_capital
     report.true_profit = sale.true_profit
+  elseif sale and external then
+    report.operational_profit = sale.operational_profit or ((sale.sale_price_gold or 0) - (external.basis_gold or 0))
+    report.applied_to_design_capital = sale.applied_to_design_capital or 0
+    report.applied_to_pattern_capital = sale.applied_to_pattern_capital or 0
+    report.true_profit = sale.true_profit or report.operational_profit
   else
-    report.unsold_cost_basis = item.operational_cost_gold
+    report.unsold_cost_basis = item and item.operational_cost_gold or external.basis_gold
   end
 
   return report
 end
 
-function ledger.apply_process_start(state, process_instance_id, process_id, inputs, gold_fee, note)
+function ledger.apply_process_start(state, process_instance_id, process_id, inputs, gold_fee, note, game_time)
   local started_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
   local event = ledger.record_event(state, "PROCESS_START", {
     process_instance_id = process_instance_id,
@@ -1638,33 +1852,36 @@ function ledger.apply_process_start(state, process_instance_id, process_id, inpu
     inputs = inputs or {},
     gold_fee = gold_fee or 0,
     note = note,
-    started_at = started_at
+    started_at = started_at,
+    game_time = game_time
   })
 
   return ledger.apply_event(state, event)
 end
 
-function ledger.apply_process_add_inputs(state, process_instance_id, inputs, note)
+function ledger.apply_process_add_inputs(state, process_instance_id, inputs, note, game_time)
   local event = ledger.record_event(state, "PROCESS_ADD_INPUTS", {
     process_instance_id = process_instance_id,
     inputs = inputs or {},
-    note = note
+    note = note,
+    game_time = game_time
   })
 
   return ledger.apply_event(state, event)
 end
 
-function ledger.apply_process_add_fee(state, process_instance_id, gold_fee, note)
+function ledger.apply_process_add_fee(state, process_instance_id, gold_fee, note, game_time)
   local event = ledger.record_event(state, "PROCESS_ADD_FEE", {
     process_instance_id = process_instance_id,
     gold_fee = gold_fee,
-    note = note
+    note = note,
+    game_time = game_time
   })
 
   return ledger.apply_event(state, event)
 end
 
-function ledger.apply_process_complete(state, process_instance_id, outputs, note)
+function ledger.apply_process_complete(state, process_instance_id, outputs, note, game_time)
   local instance = state.process_instances and state.process_instances[process_instance_id]
   if not instance then
     error("Process instance not found: " .. process_instance_id)
@@ -1715,7 +1932,8 @@ function ledger.apply_process_complete(state, process_instance_id, outputs, note
         process_instance_id = process_instance_id,
         outputs = outputs,
         note = note,
-        completed_at = completed_at
+        completed_at = completed_at,
+        game_time = game_time
       }
     }
   }
@@ -1725,7 +1943,8 @@ function ledger.apply_process_complete(state, process_instance_id, outputs, note
       event_type = "PROCESS_WRITE_OFF",
       payload = {
         process_instance_id = process_instance_id,
-        amount_gold = process_loss
+        amount_gold = process_loss,
+        game_time = game_time
       }
     })
   end
@@ -1803,7 +2022,7 @@ local function complete_missing_disposition(totals, returned, lost)
   return returned, lost
 end
 
-function ledger.apply_process_abort(state, process_instance_id, disposition, note)
+function ledger.apply_process_abort(state, process_instance_id, disposition, note, game_time)
   local instance = state.process_instances and state.process_instances[process_instance_id]
   if not instance then
     error("Process instance not found: " .. process_instance_id)
@@ -1876,7 +2095,8 @@ function ledger.apply_process_abort(state, process_instance_id, disposition, not
           outputs = outputs
         },
         note = note,
-        completed_at = completed_at
+        completed_at = completed_at,
+        game_time = game_time
       }
     }
   }
@@ -1886,7 +2106,8 @@ function ledger.apply_process_abort(state, process_instance_id, disposition, not
       event_type = "PROCESS_WRITE_OFF",
       payload = {
         process_instance_id = process_instance_id,
-        amount_gold = process_loss
+        amount_gold = process_loss,
+        game_time = game_time
       }
     })
   end
@@ -1897,6 +2118,30 @@ function ledger.apply_process_abort(state, process_instance_id, disposition, not
   end
 
   return state
+end
+
+function ledger.apply_process_set_game_time(state, process_instance_id, game_time, scope, note)
+  scope = scope or "write_off"
+  if scope ~= "start" and scope ~= "complete" and scope ~= "abort" and scope ~= "write_off" and scope ~= "all" then
+    error("Invalid scope: " .. tostring(scope))
+  end
+  if not game_time or not game_time.year then
+    error("game_time.year is required")
+  end
+
+  local instance = state.process_instances and state.process_instances[process_instance_id]
+  if not instance then
+    error("Process instance not found: " .. process_instance_id)
+  end
+
+  local event = ledger.record_event(state, "PROCESS_SET_GAME_TIME", {
+    process_instance_id = process_instance_id,
+    scope = scope,
+    game_time = game_time,
+    note = note
+  })
+
+  return ledger.apply_event(state, event)
 end
 
 _G.AchaeadexLedger.Core.Ledger = ledger

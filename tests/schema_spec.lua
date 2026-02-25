@@ -366,6 +366,86 @@ describe("Schema Migration", function()
       db:close()
     end)
   end)
+
+  describe("migration v9", function()
+    it("should add external_items table and indexes", function()
+      local db = lsqlite3.open_memory()
+      schema.migrate(db, 9)
+
+      local stmt = db:prepare([[SELECT name FROM sqlite_master WHERE type='table' AND name='external_items']])
+      local has_table = false
+      for _ in stmt:nrows() do
+        has_table = true
+        break
+      end
+      stmt:finalize()
+      assert.is_true(has_table, "Table external_items should exist")
+
+      local columns = {}
+      stmt = db:prepare("PRAGMA table_info(external_items)")
+      for row in stmt:nrows() do
+        columns[row.name] = true
+      end
+      stmt:finalize()
+
+      assert.is_true(columns.item_id)
+      assert.is_true(columns.acquired_at)
+      assert.is_true(columns.basis_gold)
+      assert.is_true(columns.basis_source)
+      assert.is_true(columns.status)
+
+      db:close()
+    end)
+  end)
+
+  describe("migration v10", function()
+    it("should reshape process_write_offs and add process_game_time_overrides", function()
+      local db = lsqlite3.open_memory()
+      schema.migrate(db, 10)
+
+      local stmt = db:prepare([[SELECT name FROM sqlite_master WHERE type='table' AND name='process_game_time_overrides']])
+      local has_overrides = false
+      for _ in stmt:nrows() do
+        has_overrides = true
+        break
+      end
+      stmt:finalize()
+      assert.is_true(has_overrides)
+
+      local writeoff_columns = {}
+      stmt = db:prepare("PRAGMA table_info(process_write_offs)")
+      for row in stmt:nrows() do
+        writeoff_columns[row.name] = true
+      end
+      stmt:finalize()
+
+      assert.is_true(writeoff_columns.process_instance_id)
+      assert.is_true(writeoff_columns.at)
+      assert.is_true(writeoff_columns.amount_gold)
+      assert.is_true(writeoff_columns.game_time_json)
+
+      db:close()
+    end)
+  end)
+
+  describe("migration v11", function()
+    it("should add sales.game_time_json", function()
+      local db = lsqlite3.open_memory()
+      schema.migrate(db, 11)
+
+      local columns = {}
+      local stmt = db:prepare("PRAGMA table_info(sales)")
+      for row in stmt:nrows() do
+        columns[row.name] = true
+      end
+      stmt:finalize()
+
+      assert.is_true(columns.game_time_json)
+      assert.is_true(columns.game_time_year)
+
+      db:close()
+    end)
+  end)
   
   describe("migrate function", function()
     it("should migrate from version 0 to 1", function()
@@ -374,8 +454,8 @@ describe("Schema Migration", function()
       local initial_version = schema.get_version(db)
       assert.are.equal(0, initial_version)
       
-      local final_version = schema.migrate(db, 8)
-      assert.are.equal(8, final_version)
+      local final_version = schema.migrate(db, 9)
+      assert.are.equal(9, final_version)
       
       db:close()
     end)
@@ -407,8 +487,8 @@ describe("Schema Migration", function()
       
       local version = schema.migrate(db)
       
-      -- Should migrate to the latest version (currently 8)
-      assert.are.equal(8, version)
+      -- Should migrate to the latest version (currently 11)
+      assert.are.equal(11, version)
       
       db:close()
     end)

@@ -163,6 +163,16 @@ crafted_items(
   materials_source TEXT                -- design_bom|explicit|manual|estimated (optional)
 )
 
+external_items(
+  item_id TEXT PRIMARY KEY,
+  name TEXT,
+  acquired_at TEXT NOT NULL,
+  basis_gold INTEGER NOT NULL,
+  basis_source TEXT NOT NULL,
+  status TEXT NOT NULL,
+  note TEXT
+)
+
 sales(
   sale_id TEXT PRIMARY KEY,
   item_id TEXT NOT NULL,
@@ -247,6 +257,7 @@ INDEXES (REQUIRED)
 - ledger_events(ts)
 - sales(item_id), sales(sold_at), sales(settlement_id)
 - crafted_items(source_id), crafted_items(item_id)
+- external_items(status), external_items(basis_source)
 - pattern_pools(pattern_type, status)
 - production_sources(source_kind), production_sources(source_type), production_sources(provenance), production_sources(recovery_enabled)
 - order_sales(order_id), order_sales(sale_id)
@@ -292,6 +303,10 @@ Crafting & Sales:
 - CRAFT_ITEM
 - CRAFT_RESOLVE_SOURCE
 - SELL_ITEM
+
+External Items:
+- ITEM_REGISTER_EXTERNAL
+- ITEM_UPDATE_EXTERNAL
 
 Orders:
 - ORDER_CREATE
@@ -381,7 +396,16 @@ PROCESS_WRITE_OFF supports:
 {
   process_instance_id,
   amount_gold,
+  game_time?,                          -- same shape as SELL_ITEM.game_time
   reason?,
+  note?
+}
+
+PROCESS_SET_GAME_TIME supports:
+{
+  process_instance_id,
+  scope,                               -- start|complete|abort|write_off|all
+  game_time,                           -- same shape as SELL_ITEM.game_time
   note?
 }
 
@@ -565,6 +589,7 @@ COMMANDS (MVP TOPICS)
 - sell
 - order
 - report
+- item
 - sim
 - price
 - maintenance

@@ -196,4 +196,93 @@ describe("EventStore", function()
     assert.are.equal("D1", row.source_id)
     assert.are.equal("design", row.source_kind)
   end)
+
+  it("rebuild preserves external item transformation from augmentation", function()
+    if not luasql then
+      pending("LuaSQL sqlite3 not available")
+      return
+    end
+
+    local db_path = os.tmpname()
+    local store = sqlite_store.new(db_path)
+    local state = ledger.new(store)
+
+    ledger.apply_opening_inventory(state, "gem", 1, 100)
+    ledger.apply_source_create(state, "SK-AUG", "skill", "augmentation", "Augmentation")
+    ledger.apply_item_add_external(state, "E-R1", "old amulet", 1000, "purchase")
+    ledger.apply_augment_item(state, "I-R1", "SK-AUG", "E-R1", {
+      materials = { gem = 1 },
+      fee_gold = 25
+    })
+
+    store:rebuild_projections()
+
+    local cur1 = assert(store.conn:execute("SELECT status FROM external_items WHERE item_id = 'E-R1'"))
+    local row1 = cur1:fetch({}, "a")
+    cur1:close()
+    assert.are.equal("transformed", row1.status)
+
+    local cur2 = assert(store.conn:execute("SELECT operational_cost_gold, parent_item_id FROM crafted_items WHERE item_id = 'I-R1'"))
+    local row2 = cur2:fetch({}, "a")
+    cur2:close()
+    assert.are.equal(1125, tonumber(row2.operational_cost_gold))
+    assert.are.equal("E-R1", row2.parent_item_id)
+  end)
+
+  it("rebuild applies PROCESS_SET_GAME_TIME override for historical write-offs", function()
+    if not luasql then
+      pending("LuaSQL sqlite3 not available")
+      return
+    end
+
+    local db_path = os.tmpname()
+    local store = sqlite_store.new(db_path)
+    local state = ledger.new(store)
+    local reports = _G.AchaeadexLedger.Core.Reports
+
+    ledger.apply_opening_inventory(state, "ore", 10, 10)
+    ledger.apply_process_start(state, "P-RB-YEAR", "smelt", { ore = 5 }, 10)
+    ledger.apply_process_complete(state, "P-RB-YEAR", {})
+    ledger.apply_process_set_game_time(state, "P-RB-YEAR", { year = 123 }, "write_off", "rebuild correction")
+
+    store:rebuild_projections()
+
+    local events = store:read_all()
+    local fresh = ledger.new(store)
+    for _, event in ipairs(events) do
+      ledger.apply_event(fresh, event)
+    end
+
+    local report = reports.year(fresh, 123)
+    assert.are.equal(60, report.totals.process_losses)
+    assert.are.equal(0, report.unattributed_process_write_off_count)
+
+    local cur = assert(store.conn:execute("SELECT game_time_json FROM process_game_time_overrides WHERE process_instance_id = 'P-RB-YEAR' AND scope = 'write_off'"))
+    local row = cur:fetch({}, "a")
+    cur:close()
+    assert.is_not_nil(row)
+  end)
+
+  it("projects sales game_time_json consistently", function()
+    if not luasql then
+      pending("LuaSQL sqlite3 not available")
+      return
+    end
+
+    local db_path = os.tmpname()
+    local store = sqlite_store.new(db_path)
+    local state = ledger.new(store)
+
+    ledger.apply_design_start(state, "D-GT", "shirt", "GameTime", "public", 0)
+    ledger.apply_craft_item(state, "I-GT", "D-GT", 40, "{}", nil)
+    ledger.apply_sell_item(state, "S-GT", "I-GT", 100, { year = 998, month = 1, day = 2, hour = 3, minute = 4 })
+
+    local cur = assert(store.conn:execute("SELECT game_time_json, game_time_year FROM sales WHERE sale_id = 'S-GT'"))
+    local row = cur:fetch({}, "a")
+    cur:close()
+
+    assert.is_not_nil(row)
+    assert.is_not_nil(row.game_time_json)
+    assert.are.equal(998, tonumber(row.game_time_year))
+  end)
 end)

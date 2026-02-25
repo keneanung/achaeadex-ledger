@@ -397,6 +397,112 @@ Expected:
   - outstanding pattern capital
 
 ------------------------------------------------------------
+TEST 29 – REGISTER EXTERNAL ITEM BASIS
+------------------------------------------------------------
+
+Given:
+- ITEM_REGISTER_EXTERNAL item_id=E1 basis_gold=1200 basis_source=gift
+Expected:
+- external_items contains E1 with status=active and basis=1200
+
+------------------------------------------------------------
+TEST 30 – AUGMENT EXTERNAL ITEM CARRIES BASIS
+------------------------------------------------------------
+
+Given:
+- external item E2 basis=1000
+- augmentation inputs cost 100 and fee 25
+When:
+- AUGMENT_ITEM creates new item I2 from target E2
+Expected:
+- new item basis/operational cost == 1125
+- external item E2 status == transformed
+
+------------------------------------------------------------
+TEST 31 – EXTERNAL HOLDINGS IN OVERALL REPORT
+------------------------------------------------------------
+
+Given:
+- active external items with basis sums to N
+Expected:
+- overall holdings include External items holdings == N
+- warning emitted for basis_source mtm or unknown when present
+
+------------------------------------------------------------
+TEST 32 – REBUILD PRESERVES EXTERNAL TRANSFORM STATE
+------------------------------------------------------------
+
+Given:
+- register external item, augment it, then rebuild
+Expected:
+- external target remains transformed
+- augmented crafted item basis remains deterministic
+
+------------------------------------------------------------
+TEST 33 – PROCESS WRITE-OFF PAYLOAD YEAR ATTRIBUTION
+------------------------------------------------------------
+
+Given:
+- PROCESS_WRITE_OFF has payload.game_time.year=123
+Expected:
+- year report 123 includes write-off in process losses
+
+------------------------------------------------------------
+TEST 34 – PROCESS_SET_GAME_TIME WRITE_OFF OVERRIDE
+------------------------------------------------------------
+
+Given:
+- PROCESS_WRITE_OFF without game_time
+- PROCESS_SET_GAME_TIME scope=write_off year=123
+Expected:
+- year report 123 includes write-off in process losses
+
+------------------------------------------------------------
+TEST 35 – UNATTRIBUTED PROCESS WRITE-OFF EXCLUSION
+------------------------------------------------------------
+
+Given:
+- PROCESS_WRITE_OFF without game_time
+- no PROCESS_SET_GAME_TIME override
+Expected:
+- year report excludes write-off from year activity totals
+- unattributed count/footnote indicates unresolved attribution
+
+------------------------------------------------------------
+TEST 36 – REBUILD WITH PROCESS_SET_GAME_TIME
+------------------------------------------------------------
+
+Given:
+- historical PROCESS_WRITE_OFF missing game_time
+- later PROCESS_SET_GAME_TIME correction event
+When:
+- maintenance rebuild
+Expected:
+- corrected year attribution remains deterministic and visible in year report
+
+------------------------------------------------------------
+TEST 37 – YEAR REPORT WARNING MODE
+------------------------------------------------------------
+
+Given:
+- year report run without --verbose
+Expected:
+- no warning spam by default
+And:
+- with --verbose, explicit warnings may be shown
+
+------------------------------------------------------------
+PROCESS YEAR ATTRIBUTION ADDENDUM
+------------------------------------------------------------
+
+These are mandatory and folded into this file:
+1) PROCESS_WRITE_OFF with payload.game_time.year appears in that year report.
+2) PROCESS_SET_GAME_TIME(scope=write_off) attributes historical write-offs.
+3) Missing game_time + no override remains unattributed and excluded from year totals.
+4) Rebuild remains deterministic with PROCESS_SET_GAME_TIME correction events.
+5) Year report warnings are quiet by default; explicit warnings shown only with --verbose.
+
+------------------------------------------------------------
 TEST EXECUTION
 ------------------------------------------------------------
 
