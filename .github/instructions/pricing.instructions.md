@@ -64,6 +64,10 @@ Commands (MVP):
 - adex price suggest <item_id>
   - prints base_cost_gold, rounded_base_gold and suggested prices for low/mid/high
   - indicates which policy was used (source override vs default)
+- adex price order <order_id> [--tier low|mid|high|all] [--round <gold>] [--include-sold 0|1]
+  - prints per-item suggestions and order-level lump-sum rollups
+  - defaults: tier=all, include-sold=0, round from policy unless overridden
+  - if order is settled/closed, suggestions remain informational only
 - adex design pricing set <design_id> [policy fields...]
   - sets/updates pricing policy for the design source (design_id == source_id)
 

@@ -50,17 +50,24 @@ local function committed_stats(instance)
   return total_qty, commodity_count
 end
 
-local function compute_output_basis(total_cost, committed_qty, output_qty, commodity_count)
-  if output_qty <= 0 or total_cost <= 0 then
+local function compute_output_basis(material_cost, fees_total, committed_qty, output_qty, commodity_count)
+  if output_qty <= 0 then
     return 0
   end
 
+  material_cost = material_cost or 0
+  fees_total = fees_total or 0
+
+  if material_cost <= 0 then
+    return fees_total
+  end
+
   if commodity_count == 0 or committed_qty <= 0 then
-    return total_cost
+    return material_cost + fees_total
   end
 
   if commodity_count > 1 then
-    return total_cost
+    return material_cost + fees_total
   end
 
   local ratio = output_qty / committed_qty
@@ -68,7 +75,7 @@ local function compute_output_basis(total_cost, committed_qty, output_qty, commo
     ratio = 1
   end
 
-  return total_cost * ratio
+  return (material_cost * ratio) + fees_total
 end
 
 local function allocate_from_entries(instance, commodity, qty, apply_fn)
@@ -198,9 +205,10 @@ function deferred.complete(state, process_instance_id, outputs, note, completed_
     total_output_qty = total_output_qty + qty
   end
 
-  local total_cost = instance.committed_cost_total + instance.fees_total
+  local material_cost = instance.committed_cost_total
+  local fees_total = instance.fees_total
   local committed_qty, commodity_count = committed_stats(instance)
-  local output_basis = compute_output_basis(total_cost, committed_qty, total_output_qty, commodity_count)
+  local output_basis = compute_output_basis(material_cost, fees_total, committed_qty, total_output_qty, commodity_count)
   local output_unit_cost = 0
   if total_output_qty > 0 then
     output_unit_cost = output_basis / total_output_qty
@@ -236,7 +244,8 @@ function deferred.abort(state, process_instance_id, disposition, note, completed
   local lost = disposition.lost or {}
   local outputs = disposition.outputs or {}
 
-  local total_cost = instance.committed_cost_total + instance.fees_total
+  local material_cost = instance.committed_cost_total
+  local fees_total = instance.fees_total
   local committed_qty, commodity_count = committed_stats(instance)
 
   local inventory = get_inventory()
@@ -258,7 +267,7 @@ function deferred.abort(state, process_instance_id, disposition, note, completed
     total_output_qty = total_output_qty + qty
   end
 
-  local output_basis = compute_output_basis(total_cost, committed_qty, total_output_qty, commodity_count)
+  local output_basis = compute_output_basis(material_cost, fees_total, committed_qty, total_output_qty, commodity_count)
   local output_unit_cost = 0
   if total_output_qty > 0 then
     output_unit_cost = output_basis / total_output_qty

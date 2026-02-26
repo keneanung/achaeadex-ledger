@@ -1909,16 +1909,18 @@ function ledger.apply_process_complete(state, process_instance_id, outputs, note
 
   local output_basis = 0
   if total_output_qty > 0 and committed_basis > 0 then
+    local material_basis = instance.committed_cost_total or 0
+    local fee_basis = instance.fees_total or 0
     if commodity_count == 0 or committed_qty <= 0 then
-      output_basis = committed_basis
+      output_basis = material_basis + fee_basis
     elseif commodity_count > 1 then
-      output_basis = committed_basis
+      output_basis = material_basis + fee_basis
     elseif committed_qty > 0 then
       local ratio = total_output_qty / committed_qty
       if ratio > 1 then
         ratio = 1
       end
-      output_basis = committed_basis * ratio
+      output_basis = (material_basis * ratio) + fee_basis
     end
   end
 
@@ -2068,16 +2070,18 @@ function ledger.apply_process_abort(state, process_instance_id, disposition, not
 
   local output_basis = 0
   if total_output_qty > 0 and committed_basis > 0 then
+    local material_basis = instance.committed_cost_total or 0
+    local fee_basis = instance.fees_total or 0
     if commodity_count == 0 or committed_qty <= 0 then
-      output_basis = committed_basis
+      output_basis = material_basis + fee_basis
     elseif commodity_count > 1 then
-      output_basis = committed_basis
+      output_basis = material_basis + fee_basis
     elseif committed_qty > 0 then
       local ratio = total_output_qty / committed_qty
       if ratio > 1 then
         ratio = 1
       end
-      output_basis = committed_basis * ratio
+      output_basis = (material_basis * ratio) + fee_basis
     end
   end
 

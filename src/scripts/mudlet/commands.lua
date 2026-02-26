@@ -530,6 +530,10 @@ local help_topics = {
       {
         usage = "adex price suggest <item_id>",
         example = "adex price suggest I-20260215-0001"
+      },
+      {
+        usage = "adex price order <order_id> [--tier low|mid|high|all] [--round <gold>] [--include-sold 0|1]",
+        example = "adex price order O-20260215-0001 --tier all"
       }
     }
   },
@@ -2569,6 +2573,81 @@ function commands.handle(input)
       { key = "tier", label = "Tier", nowrap = true, min = 4 },
       { key = "price", label = "Suggested", align = "right", min = 9 }
     })
+    return
+  end
+
+  if cmd == "price" and tokens[2] == "order" then
+    local order_id = tokens[3]
+    local args, flags = parse_flags(tokens, 4)
+    local tier = flags.tier or "all"
+    local round_to = flags.round and tonumber(flags.round) or nil
+    local include_sold = flags["include-sold"] and tonumber(flags["include-sold"]) == 1 or false
+
+    if not order_id then
+      error_out("usage: adex price order <order_id> [--tier low|mid|high|all] [--round <gold>] [--include-sold 0|1]")
+      return
+    end
+    if tier ~= "low" and tier ~= "mid" and tier ~= "high" and tier ~= "all" then
+      error_out("usage: adex price order <order_id> [--tier low|mid|high|all] [--round <gold>] [--include-sold 0|1]")
+      return
+    end
+
+    local suggestion = pricing.suggest_order(state, order_id, {
+      tier = tier,
+      round = round_to,
+      include_sold = include_sold
+    })
+
+    local fmt = render.format_gold or tostring
+    render.section("Order Price Suggest")
+    render.kv_block({
+      { label = "Order", value = order_id },
+      { label = "Tier", value = tier },
+      { label = "Include sold", value = include_sold and "1" or "0" },
+      { label = "Round override", value = round_to and tostring(round_to) or "(policy default)" }
+    })
+
+    local rows = {}
+    for _, row in ipairs(suggestion.item_rows or {}) do
+      table.insert(rows, {
+        item_id = row.item_id,
+        source_id = row.source_id or "(unresolved)",
+        base_cost = fmt(row.base_cost_gold or 0),
+        suggested_low = row.suggested_low and fmt(row.suggested_low) or "-",
+        suggested_mid = row.suggested_mid and fmt(row.suggested_mid) or "-",
+        suggested_high = row.suggested_high and fmt(row.suggested_high) or "-",
+        notes = row.notes or ""
+      })
+    end
+
+    render.section("Per-Item Suggestions")
+    render.table(rows, {
+      { key = "item_id", label = "Item", nowrap = true, min = 12 },
+      { key = "source_id", label = "Source", nowrap = true, min = 12 },
+      { key = "base_cost", label = "Base", align = "right", min = 8 },
+      { key = "suggested_low", label = "Low", align = "right", min = 8 },
+      { key = "suggested_mid", label = "Mid", align = "right", min = 8 },
+      { key = "suggested_high", label = "High", align = "right", min = 8 },
+      { key = "notes", label = "Notes", min = 10 }
+    })
+
+    render.section("Rollups")
+    render.kv_block({
+      { label = "Total base cost", value = fmt(suggestion.total_base_cost or 0) },
+      { label = "Lump sum low", value = fmt(suggestion.lump_sum_low or 0) },
+      { label = "Lump sum mid", value = fmt(suggestion.lump_sum_mid or 0) },
+      { label = "Lump sum high", value = fmt(suggestion.lump_sum_high or 0) },
+      { label = "Implied profit low", value = fmt(suggestion.implied_profit_low or 0) },
+      { label = "Implied profit mid", value = fmt(suggestion.implied_profit_mid or 0) },
+      { label = "Implied profit high", value = fmt(suggestion.implied_profit_high or 0) },
+      { label = "Included items", value = tostring(suggestion.included_count or 0) },
+      { label = "Excluded sold items", value = tostring(suggestion.excluded_sold_count or 0) }
+    })
+
+    if suggestion.informational_note then
+      render.print(suggestion.informational_note)
+    end
+
     return
   end
 

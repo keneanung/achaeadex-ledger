@@ -127,6 +127,23 @@ describe("Deferred Process Write-Offs", function()
     assert.are.equal(-20, report.totals.true_profit)
   end)
 
+  it("complete with outputs does not write off fees", function()
+    local store = memory_store.new()
+    local state = ledger.new(store)
+
+    ledger.apply_opening_inventory(state, "ore", 10, 10)
+    ledger.apply_process_start(state, "X2F", "smelt", { ore = 5 }, 10)
+    ledger.apply_process_complete(state, "X2F", { metal = 3 })
+
+    local write_off = find_write_off(store.events)
+    assert.is_truthy(write_off)
+    assert.are.equal("X2F", write_off.payload.process_instance_id)
+    assert.are.equal(20, write_off.payload.amount_gold)
+
+    local unit_cost = inventory.get_unit_cost(state.inventory, "metal")
+    assert.are.equal(40 / 3, unit_cost)
+  end)
+
   it("fee-only process assigns output basis and no write-off", function()
     local store = memory_store.new()
     local state = ledger.new(store)
