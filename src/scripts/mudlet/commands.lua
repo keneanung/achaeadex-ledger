@@ -105,10 +105,10 @@ local function parse_flags(tokens, start_index)
   local i = start_index or 1
   while i <= #tokens do
     local token = tokens[i]
-    if token:sub(1, 2) == "--" then
-      local key = token:sub(3)
+    if token:sub(1, 1) == "-" and token ~= "-" then
+      local key = token:gsub("^%-+", "")
       local value = tokens[i + 1]
-      if not value or value:sub(1, 2) == "--" then
+      if not value or (value:sub(1, 1) == "-" and value ~= "-") then
         flags[key] = true
         i = i + 1
       else
@@ -121,6 +121,28 @@ local function parse_flags(tokens, start_index)
     end
   end
   return args, flags
+end
+
+local function validate_known_flags(flags, allowed_flags)
+  local allowed = {}
+  for _, key in ipairs(allowed_flags or {}) do
+    allowed[key] = true
+  end
+
+  for key in pairs(flags or {}) do
+    if not allowed[key] then
+      return "unknown argument --" .. tostring(key)
+    end
+  end
+
+  return nil
+end
+
+local function validate_no_extra_args(args)
+  if not args or #args == 0 then
+    return nil
+  end
+  return "unknown argument " .. tostring(args[1])
 end
 
 local function warn_lines(report, state, time_cost_per_hour)
@@ -864,6 +886,11 @@ function commands.handle(input)
     local qty = tonumber(tokens[4])
     local unit_price = tonumber(tokens[5])
     local args, flags = parse_flags(tokens, 6)
+    local parse_err = validate_known_flags(flags, { "order", "sale" }) or validate_no_extra_args(args)
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
     if not commodity or not qty or not unit_price then
       error_out("usage: adex broker sell <commodity> <qty> <unit_price> [--order <order_id>] [--sale <sale_id>]")
       return
@@ -889,6 +916,11 @@ function commands.handle(input)
 
   if cmd == "pattern" and tokens[2] == "activate" then
     local args, flags = parse_flags(tokens, 3)
+    local parse_err = validate_known_flags(flags, {})
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
     local pool_id = nil
     local pattern_type = nil
     local name = nil
@@ -935,6 +967,11 @@ function commands.handle(input)
 
   if cmd == "design" and tokens[2] == "start" then
     local args, flags = parse_flags(tokens, 3)
+    local parse_err = validate_known_flags(flags, { "provenance", "recovery" })
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
     local design_id = nil
     local design_type = nil
     local name = nil
@@ -970,6 +1007,11 @@ function commands.handle(input)
   if cmd == "design" and tokens[2] == "update" then
     local design_id = tokens[3]
     local args, flags = parse_flags(tokens, 4)
+    local parse_err = validate_known_flags(flags, { "type", "name", "provenance", "recovery" }) or validate_no_extra_args(args)
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
     if not design_id then
       error_out("usage: adex design update <design_id> [--type <type>] [--name <name>] [--provenance private|public|organization] [--recovery 0|1]")
       return
@@ -999,6 +1041,11 @@ function commands.handle(input)
     local alias_id = tokens[5]
     local alias_kind = tokens[6]
     local args, flags = parse_flags(tokens, 7)
+    local parse_err = validate_known_flags(flags, { "active" }) or validate_no_extra_args(args)
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
     local active = flags.active and tonumber(flags.active) or 1
 
     if not design_id or not alias_id or not alias_kind then
@@ -1026,6 +1073,11 @@ function commands.handle(input)
   if cmd == "design" and tokens[2] == "bom" and tokens[3] == "set" then
     local design_id = tokens[4]
     local args, flags = parse_flags(tokens, 5)
+    local parse_err = validate_known_flags(flags, { "materials" }) or validate_no_extra_args(args)
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
     local materials = parse_kv_list(flags.materials)
     if not design_id or not flags.materials then
       error_out("usage: adex design bom set <design_id> --materials k=v,...")
@@ -1109,6 +1161,16 @@ function commands.handle(input)
   if cmd == "design" and tokens[2] == "pricing" and tokens[3] == "set" then
     local design_id = tokens[4]
     local args, flags = parse_flags(tokens, 5)
+    local parse_err = validate_known_flags(flags, {
+      "round",
+      "low-markup", "low-min", "low-max",
+      "mid-markup", "mid-min", "mid-max",
+      "high-markup", "high-min", "high-max"
+    }) or validate_no_extra_args(args)
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
     if not design_id then
       error_out("usage: adex design pricing set <design_id> [--round <gold>] [--low-markup <pct>] [--low-min <gold>] [--low-max <gold>] [--mid-markup <pct>] [--mid-min <gold>] [--mid-max <gold>] [--high-markup <pct>] [--high-min <gold>] [--high-max <gold>]")
       return
@@ -1162,6 +1224,11 @@ function commands.handle(input)
 
   if cmd == "source" and tokens[2] == "create" and tokens[3] == "skill" then
     local args, flags = parse_flags(tokens, 4)
+    local parse_err = validate_known_flags(flags, { "provenance" })
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
     local source_id = nil
     local source_type = nil
     local name = nil
@@ -1198,6 +1265,11 @@ function commands.handle(input)
   if cmd == "source" and tokens[2] == "bom" and tokens[3] == "set" then
     local source_id = tokens[4]
     local args, flags = parse_flags(tokens, 5)
+    local parse_err = validate_known_flags(flags, { "materials" }) or validate_no_extra_args(args)
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
     local materials = parse_kv_list(flags.materials)
     if not source_id or not flags.materials then
       error_out("usage: adex source bom set <source_id> --materials k=v,...")
@@ -1263,6 +1335,15 @@ function commands.handle(input)
 
   if cmd == "forge" and tokens[2] == "fire" then
     local args, flags = parse_flags(tokens, 3)
+    local parse_err = validate_known_flags(flags, { "source", "coal-cost", "expires", "note" })
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
+    if #args > 1 then
+      error_out("usage: adex forge fire [<forge_session_id>] --source <forging_source_id> [--coal-cost <gold>] [--expires <minutes>] [--note <text>]")
+      return
+    end
     local forge_session_id = args[1]
     local source_id = flags.source
     local coal_cost = flags["coal-cost"] and tonumber(flags["coal-cost"]) or nil
@@ -1310,6 +1391,11 @@ function commands.handle(input)
   if cmd == "forge" and tokens[2] == "close" then
     local forge_session_id = tokens[3]
     local args, flags = parse_flags(tokens, 4)
+    local parse_err = validate_known_flags(flags, { "method", "note" }) or validate_no_extra_args(args)
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
     local method = flags.method or "cost_weighted"
     local note = flags.note
     if not forge_session_id then
@@ -1324,6 +1410,11 @@ function commands.handle(input)
   if cmd == "forge" and tokens[2] == "expire" then
     local forge_session_id = tokens[3]
     local args, flags = parse_flags(tokens, 4)
+    local parse_err = validate_known_flags(flags, { "note" }) or validate_no_extra_args(args)
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
     local note = flags.note
     if not forge_session_id then
       error_out("usage: adex forge expire <forge_session_id> [--note <text>]")
@@ -1336,6 +1427,15 @@ function commands.handle(input)
 
   if cmd == "forge" and tokens[2] == "craft" then
     local args, flags = parse_flags(tokens, 3)
+    local parse_err = validate_known_flags(flags, { "source", "d1", "d2", "materials", "appearance", "time", "note", "cost" })
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
+    if #args > 1 then
+      error_out("usage: adex forge craft [<item_id>] --source <forging_source_id> [--d1 <descriptor>] [--d2 <descriptor>] [--materials k=v,...] [--appearance <key>] [--time <hours>] [--note <text>]")
+      return
+    end
     local item_id = args[1]
     local source_id = flags.source
     local appearance_key = flags.appearance
@@ -1399,6 +1499,15 @@ function commands.handle(input)
 
   if cmd == "augment" then
     local args, flags = parse_flags(tokens, 2)
+    local parse_err = validate_known_flags(flags, { "source", "target", "materials", "fee", "appearance", "time", "note" })
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
+    if #args > 1 then
+      error_out("usage: adex augment [<new_item_id>] --source <augmentation_source_id> --target <item_id> [--materials k=v,...] [--fee <gold>] [--appearance <key>] [--time <hours>] [--note <text>]")
+      return
+    end
     local new_item_id = args[1]
     local source_id = flags.source
     local target_item_id = flags.target
@@ -1444,6 +1553,11 @@ function commands.handle(input)
 
   if cmd == "item" and tokens[2] == "add" then
     local args, flags = parse_flags(tokens, 3)
+    local parse_err = validate_known_flags(flags, { "basis", "note" })
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
     local item_id = nil
     local name = nil
     local basis_gold = nil
@@ -1485,6 +1599,15 @@ function commands.handle(input)
 
   if cmd == "order" and tokens[2] == "create" then
     local args, flags = parse_flags(tokens, 3)
+    local parse_err = validate_known_flags(flags, { "customer", "note" })
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
+    if #args > 1 then
+      error_out("usage: adex order create [<order_id>] [--customer <name>] [--note <text>]")
+      return
+    end
     local order_id = args[1]
     local customer = flags.customer
     local note = flags.note
@@ -1515,6 +1638,11 @@ function commands.handle(input)
     local order_id = tokens[3]
     local amount_gold = tonumber(tokens[4])
     local args, flags = parse_flags(tokens, 5)
+    local parse_err = validate_known_flags(flags, { "method" }) or validate_no_extra_args(args)
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
     local method = flags.method or "cost_weighted"
     if not order_id or amount_gold == nil then
       error_out("usage: adex order settle <order_id> <amount_gold> [--method cost_weighted]")
@@ -1579,6 +1707,11 @@ function commands.handle(input)
   if cmd == "process" and tokens[2] == "apply" then
     local process_id = tokens[3]
     local args, flags = parse_flags(tokens, 4)
+    local parse_err = validate_known_flags(flags, { "inputs", "outputs", "fee", "note" }) or validate_no_extra_args(args)
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
     local inputs = parse_kv_list(flags.inputs)
     local outputs = parse_kv_list(flags.outputs)
     local fee = flags.fee and tonumber(flags.fee) or 0
@@ -1594,6 +1727,11 @@ function commands.handle(input)
 
   if cmd == "process" and tokens[2] == "list" then
     local args, flags = parse_flags(tokens, 3)
+    local parse_err = validate_known_flags(flags, { "needs-year" }) or validate_no_extra_args(args)
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
     if flags["needs-year"] then
       local reports = _G.AchaeadexLedger.Core.Reports
       if not reports then
@@ -1625,6 +1763,11 @@ function commands.handle(input)
     local process_instance_id = tokens[3]
     local year = tonumber(tokens[4])
     local args, flags = parse_flags(tokens, 5)
+    local parse_err = validate_known_flags(flags, { "scope", "note" }) or validate_no_extra_args(args)
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
     local scope = flags.scope or "write_off"
     local note = flags.note
     if not process_instance_id or not year then
@@ -1640,6 +1783,11 @@ function commands.handle(input)
 
   if cmd == "process" and tokens[2] == "start" then
     local args, flags = parse_flags(tokens, 3)
+    local parse_err = validate_known_flags(flags, { "inputs", "fee", "note" })
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
     local process_instance_id = nil
     local process_id = nil
 
@@ -1672,6 +1820,11 @@ function commands.handle(input)
   if cmd == "process" and tokens[2] == "add-inputs" then
     local process_instance_id = tokens[3]
     local args, flags = parse_flags(tokens, 4)
+    local parse_err = validate_known_flags(flags, { "inputs", "note" }) or validate_no_extra_args(args)
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
     local inputs = parse_kv_list(flags.inputs)
     local note = flags.note
     if not process_instance_id or not flags.inputs then
@@ -1687,6 +1840,11 @@ function commands.handle(input)
   if cmd == "process" and tokens[2] == "add-fee" then
     local process_instance_id = tokens[3]
     local args, flags = parse_flags(tokens, 4)
+    local parse_err = validate_known_flags(flags, { "fee", "note" }) or validate_no_extra_args(args)
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
     local fee = flags.fee and tonumber(flags.fee) or nil
     local note = flags.note
     if not process_instance_id or fee == nil then
@@ -1702,6 +1860,11 @@ function commands.handle(input)
   if cmd == "process" and tokens[2] == "complete" then
     local process_instance_id = tokens[3]
     local args, flags = parse_flags(tokens, 4)
+    local parse_err = validate_known_flags(flags, { "outputs", "note" }) or validate_no_extra_args(args)
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
     local outputs = flags.outputs and parse_kv_list(flags.outputs) or {}
     local note = flags.note
     if not process_instance_id then
@@ -1717,6 +1880,11 @@ function commands.handle(input)
   if cmd == "process" and tokens[2] == "abort" then
     local process_instance_id = tokens[3]
     local args, flags = parse_flags(tokens, 4)
+    local parse_err = validate_known_flags(flags, { "returned", "lost", "outputs", "note" }) or validate_no_extra_args(args)
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
     local returned = flags.returned and parse_kv_list(flags.returned) or {}
     local lost = flags.lost and parse_kv_list(flags.lost) or {}
     local outputs = flags.outputs and parse_kv_list(flags.outputs) or {}
@@ -1749,6 +1917,11 @@ function commands.handle(input)
 
   if cmd == "craft" then
     local args, flags = parse_flags(tokens, 2)
+    local parse_err = validate_known_flags(flags, { "materials", "appearance", "design", "source", "kind", "source-type", "time", "cost" })
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
     local item_id = nil
     local design_id = flags.design
     local source_id = flags.source
@@ -1865,6 +2038,11 @@ function commands.handle(input)
 
   if cmd == "sell" then
     local args, flags = parse_flags(tokens, 2)
+    local parse_err = validate_known_flags(flags, {})
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
     local sale_id = nil
     local item_id = nil
     local sale_price = tonumber(args[#args])
@@ -1974,6 +2152,11 @@ function commands.handle(input)
 
     local args, flags = parse_flags(tokens, 3)
     if topic == "commodities" then
+      local parse_err = validate_known_flags(flags, { "name", "sort" }) or validate_no_extra_args(args)
+      if parse_err then
+        error_out(parse_err)
+        return
+      end
       local rows = listings.list_commodities(state, {
         name = flags.name,
         sort = flags.sort
@@ -1996,6 +2179,11 @@ function commands.handle(input)
     end
 
     if topic == "patterns" then
+      local parse_err = validate_known_flags(flags, { "type", "status" }) or validate_no_extra_args(args)
+      if parse_err then
+        error_out(parse_err)
+        return
+      end
       local rows = listings.list_patterns(state, {
         type = flags.type,
         status = flags.status
@@ -2022,6 +2210,11 @@ function commands.handle(input)
     end
 
     if topic == "designs" then
+      local parse_err = validate_known_flags(flags, { "type", "provenance", "recovery" }) or validate_no_extra_args(args)
+      if parse_err then
+        error_out(parse_err)
+        return
+      end
       local recovery = flags.recovery and tonumber(flags.recovery) or nil
       local rows = listings.list_designs(state, {
         type = flags.type,
@@ -2054,6 +2247,11 @@ function commands.handle(input)
     end
 
     if topic == "sources" then
+      local parse_err = validate_known_flags(flags, { "kind", "type", "provenance", "recovery" }) or validate_no_extra_args(args)
+      if parse_err then
+        error_out(parse_err)
+        return
+      end
       local recovery = flags.recovery and tonumber(flags.recovery) or nil
       local rows = listings.list_sources(state, {
         kind = flags.kind,
@@ -2091,6 +2289,11 @@ function commands.handle(input)
     end
 
     if topic == "items" then
+      local parse_err = validate_known_flags(flags, { "source", "design", "sold", "transformed", "unresolved" }) or validate_no_extra_args(args)
+      if parse_err then
+        error_out(parse_err)
+        return
+      end
       local sold = flags.sold and tonumber(flags.sold)
       local transformed = flags.transformed and tonumber(flags.transformed)
       local rows = listings.list_items(state, {
@@ -2121,6 +2324,11 @@ function commands.handle(input)
     end
 
     if topic == "sales" then
+      local parse_err = validate_known_flags(flags, { "year", "order" }) or validate_no_extra_args(args)
+      if parse_err then
+        error_out(parse_err)
+        return
+      end
       local rows = listings.list_sales(state, {
         year = flags.year,
         order = flags.order
@@ -2147,6 +2355,11 @@ function commands.handle(input)
     end
 
     if topic == "orders" then
+      local parse_err = validate_known_flags(flags, {}) or validate_no_extra_args(args)
+      if parse_err then
+        error_out(parse_err)
+        return
+      end
       local rows = listings.list_orders(state)
       render.section("Orders")
       local display_rows = {}
@@ -2172,6 +2385,11 @@ function commands.handle(input)
     end
 
     if topic == "processes" then
+      local parse_err = validate_known_flags(flags, { "status", "process" }) or validate_no_extra_args(args)
+      if parse_err then
+        error_out(parse_err)
+        return
+      end
       local rows = listings.list_processes(state, {
         status = flags.status,
         process_id = flags.process
@@ -2198,6 +2416,11 @@ function commands.handle(input)
     end
 
     if topic == "forge" then
+      local parse_err = validate_known_flags(flags, { "status", "source" }) or validate_no_extra_args(args)
+      if parse_err then
+        error_out(parse_err)
+        return
+      end
       local rows = listings.list_forge_sessions(state, {
         status = flags.status,
         source = flags.source
@@ -2262,6 +2485,11 @@ function commands.handle(input)
 
     local year_token = tokens[3]
     local args, flags = parse_flags(tokens, 4)
+    local parse_err = validate_known_flags(flags, { "verbose" }) or validate_no_extra_args(args)
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
     if not year_token then
       error_out("usage: adex report year <year|current> [--verbose]")
       return
@@ -2448,6 +2676,11 @@ function commands.handle(input)
 
     local design_id = tokens[3]
     local args, flags = parse_flags(tokens, 4)
+    local parse_err = validate_known_flags(flags, { "items", "orders", "year" }) or validate_no_extra_args(args)
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
     if not design_id then
       error_out("usage: adex report design <design_id> [--items] [--orders] [--year <year>]")
       return
@@ -2579,6 +2812,11 @@ function commands.handle(input)
   if cmd == "price" and tokens[2] == "order" then
     local order_id = tokens[3]
     local args, flags = parse_flags(tokens, 4)
+    local parse_err = validate_known_flags(flags, { "tier", "round", "include-sold" }) or validate_no_extra_args(args)
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
     local tier = flags.tier or "all"
     local round_to = flags.round and tonumber(flags.round) or nil
     local include_sold = flags["include-sold"] and tonumber(flags["include-sold"]) == 1 or false
@@ -2655,6 +2893,11 @@ function commands.handle(input)
     local design_id = tokens[3]
     local price = tonumber(tokens[4])
     local args, flags = parse_flags(tokens, 5)
+    local parse_err = validate_known_flags(flags, { "op-cost" }) or validate_no_extra_args(args)
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
     local op_cost = flags["op-cost"] and tonumber(flags["op-cost"]) or nil
     if not design_id or price == nil then
       error_out("usage: adex sim price <design_id> <price> [--op-cost <gold>]")
@@ -2689,6 +2932,11 @@ function commands.handle(input)
     local design_id = tokens[3]
     local units = tonumber(tokens[4])
     local args, flags = parse_flags(tokens, 5)
+    local parse_err = validate_known_flags(flags, { "op-cost" }) or validate_no_extra_args(args)
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
     local op_cost = flags["op-cost"] and tonumber(flags["op-cost"]) or nil
     if not design_id or units == nil then
       error_out("usage: adex sim units <design_id> <units> [--op-cost <gold>]")
