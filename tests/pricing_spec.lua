@@ -61,11 +61,12 @@ describe("Order settlement allocation", function()
     ledger.apply_order_add_item(state, "O1", "I2")
     ledger.apply_order_add_item(state, "O1", "I3")
 
-    ledger.apply_order_settle(state, "ST1", "O1", 9000, "cost_weighted", { "S1", "S2", "S3" })
+    ledger.apply_order_settle(state, "ST1", "O1", 9000, "cost_weighted", { "S1", "S2", "S3" }, { year = 999 })
 
     assert.are.equal(1500, state.sales["S1"].sale_price_gold)
     assert.are.equal(3000, state.sales["S2"].sale_price_gold)
     assert.are.equal(4500, state.sales["S3"].sale_price_gold)
+    assert.are.equal(999, state.sales["S1"].game_time.year)
   end)
 end)
 

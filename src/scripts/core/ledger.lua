@@ -1644,7 +1644,7 @@ local function allocate_cost_weighted(items, total_amount)
   return allocations
 end
 
-function ledger.apply_order_settle(state, settlement_id, order_id, amount_gold, method, sale_ids)
+function ledger.apply_order_settle(state, settlement_id, order_id, amount_gold, method, sale_ids, game_time)
   local order = state.orders[order_id]
   if not order then
     error("Order " .. order_id .. " not found")
@@ -1709,7 +1709,7 @@ function ledger.apply_order_settle(state, settlement_id, order_id, amount_gold, 
         item_id = alloc.item_id,
         sale_price_gold = alloc.amount,
         sold_at = ts,
-        game_time = nil,
+        game_time = game_time,
         settlement_id = settlement_id
       },
       ts = ts

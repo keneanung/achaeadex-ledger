@@ -1676,7 +1676,8 @@ function commands.handle(input)
       end)
     end
 
-    ledger.apply_order_settle(state, settlement_id, order_id, amount_gold, method, sale_ids)
+    local game_time = get_game_time()
+    ledger.apply_order_settle(state, settlement_id, order_id, amount_gold, method, sale_ids, game_time)
     out("OK")
     return
   end
