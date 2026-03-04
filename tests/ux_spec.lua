@@ -129,4 +129,92 @@ describe("UX helpers", function()
     assert.are.equal("F1", forge_sessions[1].forge_session_id)
     assert.are.equal("SK-FORGE", forge_sessions[1].source_id)
   end)
+
+  it("supports source discovery filters and alias-based source view", function()
+    local store = memory_store.new()
+    local state = ledger.new(store)
+
+    ledger.apply_source_create(state, "D-BOOT-1", "design", "boots", "silver-threaded boots", {
+      provenance = "private",
+      recovery_enabled = 0,
+      metadata = { discipline = "tailoring", designer = "Keneanung", owner_raw = "Keneanung" }
+    })
+    ledger.apply_source_create(state, "D-BOOT-2", "design", "boots", "Hashani boots", {
+      provenance = "public",
+      recovery_enabled = 0,
+      metadata = { discipline = "tailoring", designer = "Ildiko", owner_raw = "*public" }
+    })
+    ledger.apply_source_create(state, "D-RING-1", "design", "ring", "Hashani ring", {
+      provenance = "organization",
+      recovery_enabled = 0,
+      metadata = { discipline = "jewellery", designer = "Ildiko", owner_raw = "the City of Hashan" }
+    })
+
+    ledger.apply_design_alias(state, "D-RING-1", "8238", "other", 1)
+
+    local private_rows = listings.list_sources(state, {
+      kind = "design",
+      provenance = "private",
+      limit = 20,
+      offset = 0,
+      sort = "newest"
+    })
+    assert.are.equal(1, #private_rows)
+    assert.are.equal("D-BOOT-1", private_rows[1].source_id)
+
+    local public_rows = listings.list_sources(state, {
+      kind = "design",
+      provenance = "public",
+      limit = 20,
+      offset = 0,
+      sort = "newest"
+    })
+    assert.are.equal(1, #public_rows)
+    assert.are.equal("D-BOOT-2", public_rows[1].source_id)
+
+    local boots_rows = listings.list_sources(state, {
+      kind = "design",
+      type = "boots",
+      limit = 20,
+      offset = 0,
+      sort = "newest"
+    })
+    assert.are.equal(2, #boots_rows)
+
+    local silver_rows = listings.list_sources(state, {
+      kind = "design",
+      q = "silver-threaded",
+      limit = 20,
+      offset = 0,
+      sort = "newest"
+    })
+    assert.are.equal(1, #silver_rows)
+    assert.are.equal("D-BOOT-1", silver_rows[1].source_id)
+
+    local hashani_rows = listings.list_sources(state, {
+      kind = "design",
+      q = "Hashani",
+      limit = 20,
+      offset = 0,
+      sort = "newest"
+    })
+    assert.are.equal(2, #hashani_rows)
+
+    local combined = listings.list_sources(state, {
+      kind = "design",
+      provenance = "public",
+      type = "boots",
+      q = "Hashani",
+      limit = 20,
+      offset = 0,
+      sort = "newest"
+    })
+    assert.are.equal(1, #combined)
+    assert.are.equal("D-BOOT-2", combined[1].source_id)
+
+    local shown_by_alias, alias_err = listings.show_source(state, "8238")
+    assert.is_nil(alias_err)
+    assert.is_not_nil(shown_by_alias)
+    assert.are.equal("D-RING-1", shown_by_alias.source_id)
+  end)
 end)

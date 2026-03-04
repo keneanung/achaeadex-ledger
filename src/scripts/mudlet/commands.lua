@@ -145,6 +145,58 @@ local function validate_no_extra_args(args)
   return "unknown argument " .. tostring(args[1])
 end
 
+local function parse_int_flag(value, name, min_value)
+  if value == nil then
+    return nil
+  end
+  local parsed = tonumber(value)
+  if not parsed or math.floor(parsed) ~= parsed then
+    return nil, name .. " must be an integer"
+  end
+  if min_value ~= nil and parsed < min_value then
+    return nil, name .. " must be >= " .. tostring(min_value)
+  end
+  return parsed
+end
+
+local function truncate_with_more(text, max_len)
+  local value = tostring(text or "")
+  if max_len == nil or max_len <= 0 or #value <= max_len then
+    return value
+  end
+
+  local suffix = " (more...)"
+  if max_len <= #suffix + 1 then
+    return value:sub(1, max_len)
+  end
+  return value:sub(1, max_len - #suffix) .. suffix
+end
+
+local function resolve_window_width()
+  if type(getWindowWrap) == "function" then
+    local width = tonumber(getWindowWrap())
+    if width and width > 0 then
+      return width
+    end
+  end
+  return 80
+end
+
+local function format_bom_inline(bom)
+  if type(bom) ~= "table" then
+    return "-"
+  end
+  local parts = {}
+  for commodity, qty in pairs(bom) do
+    table.insert(parts, tostring(commodity) .. "=" .. tostring(qty))
+  end
+  table.sort(parts)
+  if #parts == 0 then
+    return "-"
+  end
+  return table.concat(parts, ", ")
+end
+
 local function warn_lines(report, state, time_cost_per_hour)
   local warnings = {}
 
@@ -212,6 +264,21 @@ local function resolve_design_id_for_sim(state, design_id)
     return alias.source_id
   end
   return design_id
+end
+
+local function resolve_source_ref(state, source_ref)
+  local ref = tostring(source_ref or "")
+  if ref == "" then
+    return nil
+  end
+  if state.production_sources and state.production_sources[ref] then
+    return ref
+  end
+  local alias = state.design_aliases and state.design_aliases[ref] or nil
+  if alias and alias.source_id then
+    return alias.source_id
+  end
+  return ref
 end
 
 local function compute_op_cost_from_bom(state, source)
@@ -536,8 +603,8 @@ local help_topics = {
         example = "adex report process X-20260215-0001"
       },
       {
-        usage = "adex report design <design_id> [--items] [--orders] [--year <year>]",
-        example = "adex report design D1 --items"
+        usage = "adex report source <source_id_or_alias> [--items] [--orders] [--year <year>]",
+        example = "adex report source D1 --items"
       },
       {
         usage = "adex report item <item_id>",
@@ -560,6 +627,14 @@ local help_topics = {
       {
         usage = "adex price order <order_id> [--tier low|mid|high|all] [--round <gold>] [--include-sold 0|1]",
         example = "adex price order O-20260215-0001 --tier all"
+      },
+      {
+        usage = "adex price sim price <design_id_or_alias> <price> [--op-cost <gold>]",
+        example = "adex price sim price D1 200"
+      },
+      {
+        usage = "adex price sim units <design_id_or_alias> <units> [--op-cost <gold>]",
+        example = "adex price sim units D1 41"
       }
     }
   },
@@ -576,12 +651,12 @@ local help_topics = {
         example = "adex list patterns --status active"
       },
       {
-        usage = "adex list designs [--type <design_type>] [--provenance private|public|organization] [--recovery 0|1]",
-        example = "adex list designs --provenance private"
+        usage = "adex list sources [--provenance public|organization|private|foreign|any] [--type <design_type>] [--discipline tailoring|jewellery|furniture|artistry|beverages|cooking|any] [--q <keywords>] [--limit <n>] [--offset <n>] [--sort newest|oldest|name|type] [--show-aliases 0|1]",
+        example = "adex list sources --provenance private --q silver-threaded --limit 20"
       },
       {
-        usage = "adex list sources [--kind design|skill] [--type <source_type>] [--provenance <value>] [--recovery 0|1]",
-        example = "adex list sources --kind skill"
+        usage = "adex show source <source_id_or_alias>",
+        example = "adex show source 8238"
       },
       {
         usage = "adex list items [--source <design_id>] [--sold 0|1] [--transformed 0|1] [--unresolved 1]",
@@ -615,20 +690,6 @@ local help_topics = {
       }
     }
   },
-  sim = {
-    title = "Sim",
-    purpose = "Simulator for price/units needed to recover capital (uses BOM + fee when available).",
-    commands = {
-      {
-        usage = "adex sim price <design_id> <price> [--op-cost <gold>]",
-        example = "adex sim price D1 200"
-      },
-      {
-        usage = "adex sim units <design_id> <units> [--op-cost <gold>]",
-        example = "adex sim units D1 41"
-      }
-    }
-  },
   config = {
     title = "Config",
     purpose = "Configure output options.",
@@ -653,7 +714,7 @@ local help_topics = {
   },
   maintenance = {
     title = "Maintenance",
-    purpose = "Rebuild projections or show DB stats.",
+    purpose = "Rebuild projections, show DB stats, and manage game-time defaults/stats.",
     commands = {
       {
         usage = "adex maintenance stats",
@@ -662,20 +723,14 @@ local help_topics = {
       {
         usage = "adex maintenance rebuild",
         example = "adex maintenance rebuild"
-      }
-    }
-  },
-  time = {
-    title = "Time",
-    purpose = "Set default in-game year anchors and inspect year resolution stats.",
-    commands = {
-      {
-        usage = "adex time set-default-year <year> [--from-event <event_id>] [--note <text>]",
-        example = "adex time set-default-year 998 --from-event 1"
       },
       {
-        usage = "adex time stats",
-        example = "adex time stats"
+        usage = "adex maintenance time set-default-year <year> [--from-event <event_id>] [--note <text>]",
+        example = "adex maintenance time set-default-year 998 --from-event 1"
+      },
+      {
+        usage = "adex maintenance time stats",
+        example = "adex maintenance time stats"
       }
     }
   }
@@ -709,6 +764,7 @@ function commands.help(topic)
   if render and render.section and render.kv_block and render.table then
     render.section("AchaeadexLedger Help")
     render.print("Craft accounting with strict WAC and recovery.")
+    render.print("Designs are a specialized kind of production source (source_kind=design).")
     render.section("Glossary")
     render.kv_block({
       { label = "design capital", value = "gold spent to create a design, recovered via sales" },
@@ -718,7 +774,7 @@ function commands.help(topic)
     })
 
     render.section("Topics")
-    local order = { "inv", "broker", "pattern", "design", "source", "item", "order", "process", "craft", "forge", "augment", "sell", "report", "list", "price", "sim", "config", "maintenance", "time" }
+    local order = { "inv", "broker", "pattern", "design", "source", "item", "order", "process", "craft", "forge", "augment", "sell", "report", "list", "price", "config", "maintenance" }
     local rows = {}
     for _, topic_name in ipairs(order) do
       local entry = help_topics[topic_name]
@@ -738,13 +794,14 @@ function commands.help(topic)
   end
 
   out_plain("AchaeadexLedger: craft accounting with strict WAC and recovery.")
+  out_plain("Designs are a specialized kind of production source (source_kind=design).")
   out_plain("Glossary:")
   out_plain("  design capital: gold spent to create a design, recovered via sales")
   out_plain("  pattern pool: shared capital from pattern activation by type")
   out_plain("  operational cost: material WAC + fees + time cost per item")
   out_plain("  true profit: profit after design and pattern capital recovery")
   out_plain("Commands:")
-  local order = { "inv", "broker", "pattern", "design", "source", "item", "order", "process", "craft", "forge", "augment", "sell", "report", "list", "price", "sim", "config", "maintenance", "time" }
+  local order = { "inv", "broker", "pattern", "design", "source", "item", "order", "process", "craft", "forge", "augment", "sell", "report", "list", "price", "config", "maintenance" }
   for _, topic_name in ipairs(order) do
     local entry = help_topics[topic_name]
     if entry then
@@ -873,16 +930,16 @@ function commands.handle(input)
     return
   end
 
-  if cmd == "time" and tokens[2] == "set-default-year" then
-    local year = tonumber(tokens[3])
-    local args, flags = parse_flags(tokens, 4)
+  if cmd == "maintenance" and tokens[2] == "time" and tokens[3] == "set-default-year" then
+    local year = tonumber(tokens[4])
+    local args, flags = parse_flags(tokens, 5)
     local parse_err = validate_known_flags(flags, { "from-event", "note" }) or validate_no_extra_args(args)
     if parse_err then
       error_out(parse_err)
       return
     end
     if not year then
-      error_out("usage: adex time set-default-year <year> [--from-event <event_id>] [--note <text>]")
+      error_out("usage: adex maintenance time set-default-year <year> [--from-event <event_id>] [--note <text>]")
       return
     end
 
@@ -897,8 +954,8 @@ function commands.handle(input)
     return
   end
 
-  if cmd == "time" and tokens[2] == "stats" then
-    local args, flags = parse_flags(tokens, 3)
+  if cmd == "maintenance" and tokens[2] == "time" and tokens[3] == "stats" then
+    local args, flags = parse_flags(tokens, 4)
     local parse_err = validate_known_flags(flags, {}) or validate_no_extra_args(args)
     if parse_err then
       error_out(parse_err)
@@ -2251,7 +2308,7 @@ function commands.handle(input)
   if cmd == "list" then
     local topic = tokens[2]
     if not topic then
-      error_out("usage: adex list <commodities|patterns|designs|sources|items|sales|orders|processes|forge>")
+      error_out("usage: adex list <commodities|patterns|sources|items|sales|orders|processes|forge>")
       return
     end
 
@@ -2314,82 +2371,136 @@ function commands.handle(input)
       return
     end
 
-    if topic == "designs" then
-      local parse_err = validate_known_flags(flags, { "type", "provenance", "recovery" }) or validate_no_extra_args(args)
-      if parse_err then
-        error_out(parse_err)
-        return
-      end
-      local recovery = flags.recovery and tonumber(flags.recovery) or nil
-      local rows = listings.list_designs(state, {
-        type = flags.type,
-        provenance = flags.provenance,
-        recovery = recovery
-      })
-      render.section("Designs")
-      local display_rows = {}
-      for _, row in ipairs(rows) do
-        table.insert(display_rows, {
-          design_id = row.design_id,
-          design_type = row.design_type,
-          name = row.name or "",
-          provenance = row.provenance,
-          recovery_enabled = tostring(row.recovery_enabled),
-          pattern_pool_id = row.pattern_pool_id or "-",
-          design_remaining = render.format_gold and render.format_gold(row.design_remaining) or tostring(row.design_remaining)
-        })
-      end
-      render.table(display_rows, {
-        { key = "design_id", label = "Design ID", nowrap = true, min = 12 },
-        { key = "design_type", label = "Type", nowrap = true, min = 6 },
-        { key = "name", label = "Name", min = 12 },
-        { key = "provenance", label = "Prov", nowrap = true, min = 6 },
-        { key = "recovery_enabled", label = "Rec", nowrap = true, min = 3 },
-        { key = "pattern_pool_id", label = "Pool", nowrap = true, min = 8 },
-        { key = "design_remaining", label = "Remaining", align = "right", min = 9 }
-      })
-      return
-    end
-
     if topic == "sources" then
-      local parse_err = validate_known_flags(flags, { "kind", "type", "provenance", "recovery" }) or validate_no_extra_args(args)
+      local parse_err = validate_known_flags(flags, {
+        "kind", "type", "provenance", "recovery", "discipline", "q", "limit", "offset", "sort", "show-aliases"
+      }) or validate_no_extra_args(args)
       if parse_err then
         error_out(parse_err)
         return
       end
+
       local recovery = flags.recovery and tonumber(flags.recovery) or nil
+      local limit, limit_err = parse_int_flag(flags["limit"] or 20, "limit", 1)
+      if limit_err then
+        error_out(limit_err)
+        return
+      end
+      local offset, offset_err = parse_int_flag(flags["offset"] or 0, "offset", 0)
+      if offset_err then
+        error_out(offset_err)
+        return
+      end
+
+      local show_aliases = flags["show-aliases"]
+      if show_aliases == nil then
+        show_aliases = 0
+      else
+        show_aliases = tonumber(show_aliases)
+        if show_aliases ~= 0 and show_aliases ~= 1 then
+          error_out("show-aliases must be 0 or 1")
+          return
+        end
+      end
+
+      local sort = flags.sort or "newest"
+      if sort ~= "newest" and sort ~= "oldest" and sort ~= "name" and sort ~= "type" then
+        error_out("sort must be newest|oldest|name|type")
+        return
+      end
+
+      local provenance = flags.provenance or "any"
+
       local rows = listings.list_sources(state, {
-        kind = flags.kind,
+        kind = flags.kind or "design",
         type = flags.type,
-        provenance = flags.provenance,
-        recovery = recovery
+        provenance = provenance,
+        discipline = flags.discipline or "any",
+        q = flags.q,
+        recovery = recovery,
+        limit = limit,
+        offset = offset,
+        sort = sort,
+        show_aliases = show_aliases
       })
+
       render.section("Sources")
       local display_rows = {}
+      local width = resolve_window_width()
+      local short_desc_max = 14
+      if width >= 120 then
+        short_desc_max = 56
+      elseif width >= 100 then
+        short_desc_max = 40
+      elseif width >= 80 then
+        short_desc_max = 28
+      end
+
       for _, row in ipairs(rows) do
-        local source_name = row.name or ""
+        local source_name = tostring(row.short_desc or row.name or "")
         source_name = source_name:gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+        local alias_text = tostring(row.alias_id or "-")
+        if show_aliases == 1 and row.aliases and #row.aliases > 1 then
+          local all_aliases = {}
+          for _, alias in ipairs(row.aliases) do
+            table.insert(all_aliases, alias.alias_id)
+          end
+          table.sort(all_aliases)
+          alias_text = table.concat(all_aliases, ",")
+        end
         table.insert(display_rows, {
           source_id = row.source_id,
-          source_kind = row.source_kind,
-          source_type = row.source_type,
-          name = source_name,
+          alias_id = alias_text,
           provenance = row.provenance or "",
-          recovery_enabled = tostring(row.recovery_enabled),
-          status = row.status or "",
-          capital_remaining = render.format_gold and render.format_gold(row.capital_remaining) or tostring(row.capital_remaining)
+          discipline = row.discipline or "-",
+          design_type = row.design_type or row.source_type or "-",
+          fee = render.format_gold and render.format_gold(row.per_item_fee_gold or 0) or tostring(row.per_item_fee_gold or 0),
+          short_desc = truncate_with_more(source_name, short_desc_max)
         })
       end
-      render.table(display_rows, {
-        { key = "source_id", label = "Source ID", nowrap = true, min = 10 },
-        { key = "source_kind", label = "Kind", nowrap = true, min = 6 },
-        { key = "source_type", label = "Type", nowrap = true, min = 8 },
-        { key = "name", label = "Name", min = 10 },
-        { key = "provenance", label = "Prov", nowrap = true, min = 4 },
-        { key = "recovery_enabled", label = "Rec", nowrap = true, min = 3 },
-        { key = "status", label = "Status", nowrap = true, min = 11 },
-        { key = "capital_remaining", label = "Remaining", nowrap = true, min = 9 }
-      })
+
+      local columns
+      if width < 75 then
+        columns = {
+          { key = "source_id", label = "Source ID", nowrap = true, min = 10 },
+          { key = "provenance", label = "Prov", nowrap = true, min = 6 },
+          { key = "design_type", label = "Type", nowrap = true, min = 8 },
+          { key = "short_desc", label = "Short Desc", min = 14 }
+        }
+      elseif width < 105 then
+        columns = {
+          { key = "source_id", label = "Source ID", nowrap = true, min = 10 },
+          { key = "alias_id", label = "Alias", nowrap = true, min = 6 },
+          { key = "provenance", label = "Prov", nowrap = true, min = 6 },
+          { key = "design_type", label = "Type", nowrap = true, min = 8 },
+          { key = "fee", label = "Fee", align = "right", min = 6 },
+          { key = "short_desc", label = "Short Desc", min = 16 }
+        }
+      else
+        columns = {
+          { key = "source_id", label = "Source ID", nowrap = true, min = 10 },
+          { key = "alias_id", label = "Alias", nowrap = true, min = 6 },
+          { key = "provenance", label = "Prov", nowrap = true, min = 6 },
+          { key = "discipline", label = "Discipline", nowrap = true, min = 10 },
+          { key = "design_type", label = "Type", nowrap = true, min = 8 },
+          { key = "fee", label = "Fee", align = "right", min = 6 },
+          { key = "short_desc", label = "Short Desc", min = 20 }
+        }
+      end
+
+      render.table(display_rows, columns)
+
+      local total = tonumber(rows.total) or #rows
+      local shown = #rows
+      local start_count = shown > 0 and (offset + 1) or 0
+      local end_count = offset + shown
+      local next_offset = offset + shown
+      if end_count < total then
+        out_plain("Showing " .. tostring(start_count) .. "-" .. tostring(end_count) .. " of " .. tostring(total)
+          .. " (use --offset " .. tostring(next_offset) .. ")")
+      else
+        out_plain("Showing " .. tostring(start_count) .. "-" .. tostring(end_count) .. " of " .. tostring(total))
+      end
       return
     end
 
@@ -2556,6 +2667,54 @@ function commands.handle(input)
     end
 
     error_out("unknown list topic")
+    return
+  end
+
+  if cmd == "show" and tokens[2] == "source" then
+    local source_ref = tokens[3]
+    if not source_ref then
+      error_out("usage: adex show source <source_id_or_alias>")
+      return
+    end
+
+    local source, err = listings.show_source(state, source_ref)
+    if not source then
+      error_out(err or "source not found")
+      return
+    end
+
+    local aliases = {}
+    for _, alias in ipairs(source.aliases or {}) do
+      table.insert(aliases, tostring(alias.alias_id))
+    end
+    table.sort(aliases)
+
+    local fmt = render.format_gold or tostring
+    render.section("Source")
+    render.kv_block({
+      { label = "Source ID", value = source.source_id },
+      { label = "Aliases", value = #aliases > 0 and table.concat(aliases, ", ") or "-" },
+      { label = "Provenance", value = source.provenance or "unknown" },
+      { label = "Discipline", value = source.discipline or "-" },
+      { label = "Type", value = source.source_type or "unknown" },
+      { label = "Fee", value = fmt(source.per_item_fee_gold or 0) },
+      { label = "Recovery", value = tostring(source.recovery_enabled or 0) },
+      { label = "Pattern pool", value = source.pattern_pool_id or "-" },
+      { label = "Short desc", value = source.short_desc or source.name or "" }
+    })
+
+    render.section("BOM")
+    out_plain(format_bom_inline(source.bom))
+
+    local metadata = source.metadata or {}
+    render.section("Metadata")
+    render.kv_block({
+      { label = "Designer", value = metadata.designer or "-" },
+      { label = "Owner", value = metadata.owner_raw or "-" },
+      { label = "Months", value = metadata.months_usefulness or "-" },
+      { label = "Method", value = metadata.method or "-" },
+      { label = "Aged", value = metadata.aged or "-" }
+    })
     return
   end
 
@@ -2772,24 +2931,26 @@ function commands.handle(input)
     return
   end
 
-  if cmd == "report" and tokens[2] == "design" then
+  if cmd == "report" and tokens[2] == "source" then
     local reports = _G.AchaeadexLedger.Core.Reports
     if not reports then
       error_out("reports module not loaded")
       return
     end
 
-    local design_id = tokens[3]
+    local design_ref = tokens[3]
     local args, flags = parse_flags(tokens, 4)
     local parse_err = validate_known_flags(flags, { "items", "orders", "year" }) or validate_no_extra_args(args)
     if parse_err then
       error_out(parse_err)
       return
     end
-    if not design_id then
-      error_out("usage: adex report design <design_id> [--items] [--orders] [--year <year>]")
+    if not design_ref then
+      error_out("usage: adex report source <source_id_or_alias> [--items] [--orders] [--year <year>]")
       return
     end
+
+    local design_id = resolve_source_ref(state, design_ref)
 
     local opts = {
       include_items = flags.items and true or false,
@@ -2807,7 +2968,7 @@ function commands.handle(input)
         year = game_time.year
       end
       if not year then
-        error_out("usage: adex report design <design_id> [--items] [--orders] [--year <year>]")
+        error_out("usage: adex report source <source_id_or_alias> [--items] [--orders] [--year <year>]")
         return
       end
       opts.year = year
@@ -3140,10 +3301,10 @@ function commands.handle(input)
     return
   end
 
-  if cmd == "sim" and tokens[2] == "price" then
-    local design_id = tokens[3]
-    local price = tonumber(tokens[4])
-    local args, flags = parse_flags(tokens, 5)
+  if cmd == "price" and tokens[2] == "sim" and tokens[3] == "price" then
+    local design_id = tokens[4]
+    local price = tonumber(tokens[5])
+    local args, flags = parse_flags(tokens, 6)
     local parse_err = validate_known_flags(flags, { "op-cost" }) or validate_no_extra_args(args)
     if parse_err then
       error_out(parse_err)
@@ -3151,7 +3312,7 @@ function commands.handle(input)
     end
     local op_cost = flags["op-cost"] and tonumber(flags["op-cost"]) or nil
     if not design_id or price == nil then
-      error_out("usage: adex sim price <design_id> <price> [--op-cost <gold>]")
+      error_out("usage: adex price sim price <design_id_or_alias> <price> [--op-cost <gold>]")
       return
     end
     local resolved_id = resolve_design_id_for_sim(state, design_id)
@@ -3179,10 +3340,10 @@ function commands.handle(input)
     return
   end
 
-  if cmd == "sim" and tokens[2] == "units" then
-    local design_id = tokens[3]
-    local units = tonumber(tokens[4])
-    local args, flags = parse_flags(tokens, 5)
+  if cmd == "price" and tokens[2] == "sim" and tokens[3] == "units" then
+    local design_id = tokens[4]
+    local units = tonumber(tokens[5])
+    local args, flags = parse_flags(tokens, 6)
     local parse_err = validate_known_flags(flags, { "op-cost" }) or validate_no_extra_args(args)
     if parse_err then
       error_out(parse_err)
@@ -3190,7 +3351,7 @@ function commands.handle(input)
     end
     local op_cost = flags["op-cost"] and tonumber(flags["op-cost"]) or nil
     if not design_id or units == nil then
-      error_out("usage: adex sim units <design_id> <units> [--op-cost <gold>]")
+      error_out("usage: adex price sim units <design_id_or_alias> <units> [--op-cost <gold>]")
       return
     end
     local resolved_id = resolve_design_id_for_sim(state, design_id)

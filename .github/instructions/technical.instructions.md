@@ -267,6 +267,13 @@ INDEXES (REQUIRED)
 - design_id_aliases(source_id)
 - design_appearance_aliases(source_id)
 
+Discovery/listing performance expectations for source search:
+- list/search commands must read projection-backed state (never mutate ledger)
+- provenance/type/recovery filtering must use production_sources fields
+- discipline/keyword matching should use source metadata payload fields when available
+- sorting/paging should be deterministic (created_at/source_id tie-breakers)
+- if SQL-backed query paths are introduced later, reuse existing indexes first before adding new ones
+
 ------------------------------------------------------------
 EVENT TYPES (AUTHORITATIVE)
 ------------------------------------------------------------

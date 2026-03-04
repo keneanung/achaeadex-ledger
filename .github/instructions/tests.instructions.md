@@ -615,6 +615,24 @@ These are mandatory and folded into this file:
 6) Re-parsing the same block must remain idempotent in upsert behavior.
 
 ------------------------------------------------------------
+DISCOVERY + FILTERING ADDENDUM
+------------------------------------------------------------
+
+These are mandatory and folded into this file:
+1) Source discovery tests must cover provenance filters.
+2) Source discovery tests must cover design type filter.
+3) Source discovery tests must cover keyword search on short_desc/name (and metadata when present).
+4) Combined filters (provenance + type + q) must be ANDed.
+5) Alias resolution tests must cover `adex show source <alias_id>` resolving to the correct internal source_id.
+
+Minimum concrete cases:
+- `--provenance private` returns only private design sources.
+- `--provenance public` returns only public design sources.
+- `--type boots` returns only boots design sources.
+- `--q "silver-threaded"` matches short_desc/name fields.
+- `--q "Hashani"` matches short_desc/name fields (and metadata when present).
+
+------------------------------------------------------------
 TEST EXECUTION
 ------------------------------------------------------------
 

@@ -73,7 +73,16 @@ Rules:
 - `adex list designs`
   - lists design sources (production_sources where source_kind="design"):
     source_id, source_type (design_type), name, provenance, recovery_enabled, pattern_pool_id, capital_remaining
-  - filters: --type, --provenance, --recovery
+  - filters: --provenance, --type, --discipline, --q, --limit, --offset, --sort, --show-aliases
+
+- `adex list sources [--provenance public|organization|private|foreign|any] [--type <design_type>] [--discipline <discipline|any>] [--q <keywords>] [--limit <n>] [--offset <n>] [--sort newest|oldest|name|type] [--show-aliases 0|1]`
+  - defaults: provenance=any, discipline=any, limit=20, offset=0, sort=newest, show-aliases=0
+  - keyword matching fields: source name/short_desc and metadata fields (designer, owner_raw, generic when present)
+  - list output should include paging footer: "Showing X-Y of N"
+
+- `adex show source <source_id_or_alias>`
+  - resolves alias_id -> source_id
+  - shows provenance, discipline, type, fee, BOM, short_desc, aliases, and key metadata
 
 - `adex list items`
   - item_id, kind(crafted|external), source_id(or external), appearance/name, created/acquired_at, sold?(yes/no)

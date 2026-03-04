@@ -25,6 +25,98 @@ local function match_substring(value, needle)
   return string.find(string.lower(value), string.lower(needle), 1, true) ~= nil
 end
 
+local function normalize_text(value)
+  local text = tostring(value or "")
+  text = (text:gsub("^%s+", ""))
+  text = (text:gsub("%s+$", ""))
+  return string.lower(text)
+end
+
+local function split_keywords(query)
+  local words = {}
+  local value = tostring(query or "")
+  value = (value:gsub("^%s+", ""))
+  value = (value:gsub("%s+$", ""))
+  for token in value:gmatch("%S+") do
+    table.insert(words, string.lower(token))
+  end
+  return words
+end
+
+local function collect_aliases_for_source(state, source_id, only_active)
+  local aliases = {}
+  for alias_id, info in pairs(state.design_aliases or {}) do
+    if info and info.source_id == source_id then
+      if (not only_active) or info.active == 1 then
+        table.insert(aliases, {
+          alias_id = alias_id,
+          alias_kind = info.alias_kind,
+          active = info.active
+        })
+      end
+    end
+  end
+  table.sort(aliases, function(a, b)
+    return tostring(a.alias_id) < tostring(b.alias_id)
+  end)
+  return aliases
+end
+
+local function source_matches_keywords(source, query)
+  local keywords = split_keywords(query)
+  if #keywords == 0 then
+    return true
+  end
+
+  local metadata = source.metadata or {}
+  local haystack = table.concat({
+    tostring(source.name or ""),
+    tostring(metadata.generic or ""),
+    tostring(metadata.designer or ""),
+    tostring(metadata.owner_raw or ""),
+    tostring(metadata.dropped_desc or "")
+  }, " "):lower()
+
+  for _, keyword in ipairs(keywords) do
+    if not string.find(haystack, keyword, 1, true) then
+      return false
+    end
+  end
+
+  return true
+end
+
+local function compare_source_rows(sort_key)
+  sort_key = sort_key or "newest"
+  return function(a, b)
+    if sort_key == "oldest" then
+      if tostring(a.created_at or "") == tostring(b.created_at or "") then
+        return tostring(a.source_id) < tostring(b.source_id)
+      end
+      return tostring(a.created_at or "") < tostring(b.created_at or "")
+    elseif sort_key == "name" then
+      local an = normalize_text(a.short_desc)
+      local bn = normalize_text(b.short_desc)
+      if an == bn then
+        return tostring(a.source_id) < tostring(b.source_id)
+      end
+      return an < bn
+    elseif sort_key == "type" then
+      local at = normalize_text(a.design_type)
+      local bt = normalize_text(b.design_type)
+      if at == bt then
+        return tostring(a.source_id) < tostring(b.source_id)
+      end
+      return at < bt
+    end
+
+    if tostring(a.created_at or "") == tostring(b.created_at or "") then
+      return tostring(a.source_id) > tostring(b.source_id)
+    end
+    return tostring(a.created_at or "") > tostring(b.created_at or "")
+  end
+end
+
 function listings.list_commodities(state, opts)
   opts = opts or {}
   local inventory = get_inventory()
@@ -117,32 +209,113 @@ end
 function listings.list_sources(state, opts)
   opts = opts or {}
   local rows = {}
+  local provenance_filter = opts.provenance
+  if provenance_filter == "any" then
+    provenance_filter = nil
+  end
+  local discipline_filter = opts.discipline
+  if discipline_filter == "any" then
+    discipline_filter = nil
+  end
+
+  local include_aliases = opts.show_aliases == 1 or opts.show_aliases == true
 
   for _, source in pairs(state.production_sources or {}) do
     if (not opts.kind or source.source_kind == opts.kind)
       and (not opts.type or source.source_type == opts.type)
-      and (not opts.provenance or source.provenance == opts.provenance)
-      and (opts.recovery == nil or source.recovery_enabled == opts.recovery) then
+      and (not provenance_filter or source.provenance == provenance_filter)
+      and (opts.recovery == nil or source.recovery_enabled == opts.recovery)
+      and (not discipline_filter or ((source.metadata and source.metadata.discipline) == discipline_filter))
+      and source_matches_keywords(source, opts.q) then
+      local aliases = collect_aliases_for_source(state, source.source_id, true)
+      local alias_id = aliases[1] and aliases[1].alias_id or nil
+      local metadata = source.metadata or {}
       table.insert(rows, {
         source_id = source.source_id,
         source_kind = source.source_kind,
         source_type = source.source_type,
+        discipline = metadata.discipline,
+        design_type = source.source_type,
         name = source.name,
+        short_desc = source.name,
+        alias_id = alias_id,
+        aliases = include_aliases and aliases or nil,
         provenance = source.provenance,
         recovery_enabled = source.recovery_enabled,
         pattern_pool_id = source.pattern_pool_id,
         capital_remaining = source.capital_remaining or 0,
         status = source.status,
-        per_item_fee_gold = source.per_item_fee_gold or 0
+        per_item_fee_gold = source.per_item_fee_gold or 0,
+        created_at = source.created_at,
+        metadata = source.metadata
       })
     end
   end
 
-  table.sort(rows, function(a, b)
-    return a.source_id < b.source_id
-  end)
+  table.sort(rows, compare_source_rows(opts.sort))
+
+  local total = #rows
+  local offset = tonumber(opts.offset) or 0
+  if offset < 0 then
+    offset = 0
+  end
+  local limit = tonumber(opts.limit)
+
+  if limit and limit > 0 then
+    local paged = {}
+    local start_index = offset + 1
+    local end_index = math.min(total, offset + limit)
+    for i = start_index, end_index do
+      if rows[i] then
+        table.insert(paged, rows[i])
+      end
+    end
+    rows = paged
+  end
+
+  rows.total = total
+  rows.offset = offset
+  rows.limit = limit
 
   return rows
+end
+
+function listings.show_source(state, source_ref)
+  local ref = tostring(source_ref or "")
+  if ref == "" then
+    return nil, "source reference is required"
+  end
+
+  local source_id = ref
+  if not (state.production_sources and state.production_sources[source_id]) then
+    local alias = state.design_aliases and state.design_aliases[ref] or nil
+    if alias and alias.source_id then
+      source_id = alias.source_id
+    end
+  end
+
+  local source = state.production_sources and state.production_sources[source_id] or nil
+  if not source then
+    return nil, "source not found: " .. tostring(ref)
+  end
+
+  return {
+    source_id = source.source_id,
+    source_kind = source.source_kind,
+    source_type = source.source_type,
+    discipline = source.metadata and source.metadata.discipline or nil,
+    name = source.name,
+    short_desc = source.name,
+    provenance = source.provenance,
+    recovery_enabled = source.recovery_enabled,
+    pattern_pool_id = source.pattern_pool_id,
+    per_item_fee_gold = source.per_item_fee_gold or 0,
+    status = source.status,
+    capital_remaining = source.capital_remaining or 0,
+    bom = source.bom,
+    metadata = source.metadata,
+    aliases = collect_aliases_for_source(state, source.source_id, false)
+  }
 end
 
 function listings.list_items(state, opts)
