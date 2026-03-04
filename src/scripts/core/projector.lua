@@ -827,6 +827,16 @@ function projector.apply(conn, event)
       sql_value(ts),
       sql_value(payload.note)
     ))
+
+    exec_sql(conn, string.format(
+      "UPDATE process_write_offs SET resolved_game_year = COALESCE(" ..
+      "CAST(json_extract(game_time_json, '$.year') AS INTEGER), " ..
+      "(SELECT CAST(json_extract(o.game_time_json, '$.year') AS INTEGER) FROM process_game_time_overrides o WHERE o.process_instance_id = process_write_offs.process_instance_id AND o.scope = 'write_off' LIMIT 1), " ..
+      "(SELECT CAST(json_extract(o.game_time_json, '$.year') AS INTEGER) FROM process_game_time_overrides o WHERE o.process_instance_id = process_write_offs.process_instance_id AND o.scope = 'all' LIMIT 1), " ..
+      "(SELECT default_year FROM ledger_game_year_defaults d WHERE d.effective_from_event_id <= process_write_offs.source_event_id ORDER BY d.effective_from_event_id DESC LIMIT 1)) " ..
+      "WHERE process_instance_id = %s",
+      sql_value(payload.process_instance_id)
+    ))
     return
   end
 

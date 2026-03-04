@@ -321,44 +321,6 @@ function ledger.record_events(state, events)
   return events
 end
 
--- Simple JSON serialization (minimal implementation)
-function ledger._serialize(obj)
-  if type(obj) == "table" then
-    local parts = {}
-    local is_array = true
-    for k, v in pairs(obj) do
-      if type(k) ~= "number" then
-        is_array = false
-        break
-      end
-    end
-
-    if is_array then
-      for i, v in ipairs(obj) do
-        table.insert(parts, ledger._serialize(v))
-      end
-      return "[" .. table.concat(parts, ",") .. "]"
-    else
-      for k, v in pairs(obj) do
-        local key = '"' .. tostring(k) .. '"'
-        local value = ledger._serialize(v)
-        table.insert(parts, key .. ":" .. value)
-      end
-      return "{" .. table.concat(parts, ",") .. "}"
-    end
-  elseif type(obj) == "string" then
-    return '"' .. obj:gsub('"', '\\"') .. '"'
-  elseif type(obj) == "number" then
-    return tostring(obj)
-  elseif type(obj) == "boolean" then
-    return obj and "true" or "false"
-  elseif obj == nil then
-    return "null"
-  else
-    return '"' .. tostring(obj) .. '"'
-  end
-end
-
 function ledger.apply_event(state, event)
   assert(type(event) == "table", "event must be a table")
   local event_type = event.event_type

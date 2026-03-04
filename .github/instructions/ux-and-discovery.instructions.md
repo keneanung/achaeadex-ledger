@@ -24,7 +24,7 @@ Rules:
      - at least one example invocation
 2) Provide additional scoped help:
    - `adex help <topic>` where topic in:
-  inv, broker, pattern, design, item, process, craft, sell, report, order, sim, price, list, maintenance, config
+  inv, broker, pattern, design, source, item, order, process, craft, forge, augment, sell, report, list, price, config, maintenance
 3) Help text must be stable, concise, and actionable.
 
 ------------------------------------------------------------

@@ -404,13 +404,6 @@ function reports.overall(state, opts)
     table.insert(sales, sale)
   end
   local totals = sum_totals(sales)
-  local year_settlement_count = 0
-  for _, settlement in pairs(state.order_settlements or {}) do
-    local resolved_year = settlement.resolved_game_year and tonumber(settlement.resolved_game_year) or nil
-    if resolved_year and resolved_year == tonumber(year) then
-      year_settlement_count = year_settlement_count + 1
-    end
-  end
   local process_loss_summary = process_write_off_summary(state)
   local process_losses = round_gold(process_loss_summary.total)
 
@@ -493,6 +486,13 @@ function reports.year(state, year, opts)
   end
 
   local totals = sum_totals(sales)
+  local year_settlement_count = 0
+  for _, settlement in pairs(state.order_settlements or {}) do
+    local resolved_year = settlement.resolved_game_year and tonumber(settlement.resolved_game_year) or nil
+    if resolved_year and resolved_year == tonumber(year) then
+      year_settlement_count = year_settlement_count + 1
+    end
+  end
   local process_loss_summary = process_write_off_summary(state, year)
   local process_losses = round_gold(process_loss_summary.total)
   local year_process_losses = round_gold(process_loss_summary.year_total)
@@ -535,7 +535,7 @@ function reports.year(state, year, opts)
   totals.true_profit = round_gold(totals.true_profit) - year_process_losses
 
   local note = nil
-  if opts.verbose and process_loss_summary.unattributed_count > 0 then
+  if process_loss_summary.unattributed_count > 0 then
     note = string.format(
       "Note: %d process write-offs are not attributed to a game year. Use 'adex process list --needs-year' and 'adex process set-year ...' to fix.",
       process_loss_summary.unattributed_count

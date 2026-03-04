@@ -231,7 +231,7 @@ describe("Reports", function()
     local report = reports.year(state, 123)
     assert.are.equal(0, report.totals.process_losses)
     assert.are.equal(1, report.unattributed_process_write_off_count)
-    assert.is_nil(report.note)
+    assert.is_not_nil(report.note)
 
     local verbose_report = reports.year(state, 123, { verbose = true })
     assert.is_not_nil(verbose_report.note)
@@ -239,6 +239,23 @@ describe("Reports", function()
     local unresolved = reports.process_write_offs_needing_year(state)
     assert.are.equal(1, #unresolved)
     assert.are.equal("P-NOYEAR", unresolved[1].process_instance_id)
+  end)
+
+  it("year report includes order settlement count for resolved year", function()
+    local store = memory_store.new()
+    local state = ledger.new(store)
+
+    ledger.apply_design_start(state, "D1", "shirt", "Test", "public", 0)
+    ledger.apply_craft_item(state, "I1", "D1", 1000, "{}", nil)
+    ledger.apply_order_create(state, "O1", "Customer", "")
+    ledger.apply_order_add_item(state, "O1", "I1")
+    ledger.apply_order_settle(state, "ST-998", "O1", 1200, "cost_weighted", { "S-998" }, { year = 998 })
+
+    local report_998 = reports.year(state, 998)
+    assert.are.equal(1, report_998.order_settlement_count)
+
+    local report_999 = reports.year(state, 999)
+    assert.are.equal(0, report_999.order_settlement_count)
   end)
 
   it("event without game_time resolves year from default anchor", function()

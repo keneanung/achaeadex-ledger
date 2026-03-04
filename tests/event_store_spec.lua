@@ -263,6 +263,35 @@ describe("EventStore", function()
     assert.is_not_nil(row)
   end)
 
+  it("updates projected write-off year immediately after PROCESS_SET_GAME_TIME", function()
+    if not luasql then
+      pending("LuaSQL sqlite3 not available")
+      return
+    end
+
+    local db_path = os.tmpname()
+    local store = sqlite_store.new(db_path)
+    local state = ledger.new(store)
+
+    ledger.apply_opening_inventory(state, "ore", 10, 10)
+    ledger.apply_process_start(state, "P-IMM-YEAR", "smelt", { ore = 5 }, 10)
+    ledger.apply_process_complete(state, "P-IMM-YEAR", {})
+
+    local cur_before = assert(store.conn:execute("SELECT resolved_game_year FROM process_write_offs WHERE process_instance_id = 'P-IMM-YEAR'"))
+    local row_before = cur_before:fetch({}, "a")
+    cur_before:close()
+    assert.is_not_nil(row_before)
+    assert.is_nil(row_before.resolved_game_year)
+
+    ledger.apply_process_set_game_time(state, "P-IMM-YEAR", { year = 123 }, "write_off", "inline correction")
+
+    local cur_after = assert(store.conn:execute("SELECT resolved_game_year FROM process_write_offs WHERE process_instance_id = 'P-IMM-YEAR'"))
+    local row_after = cur_after:fetch({}, "a")
+    cur_after:close()
+    assert.is_not_nil(row_after)
+    assert.are.equal(123, tonumber(row_after.resolved_game_year))
+  end)
+
   it("projects sales game_time_json consistently", function()
     if not luasql then
       pending("LuaSQL sqlite3 not available")

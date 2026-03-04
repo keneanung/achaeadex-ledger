@@ -591,13 +591,15 @@ COMMANDS (MVP TOPICS)
 - broker
 - pattern
 - design
+- source
+- forge
+- augment
 - process
 - craft
 - sell
 - order
 - report
 - item
-- sim
 - price
 - maintenance
 - list
