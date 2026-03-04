@@ -231,11 +231,54 @@ describe("Reports", function()
     local report = reports.year(state, 123)
     assert.are.equal(0, report.totals.process_losses)
     assert.are.equal(1, report.unattributed_process_write_off_count)
-    assert.is_not_nil(report.note)
+    assert.is_nil(report.note)
+
+    local verbose_report = reports.year(state, 123, { verbose = true })
+    assert.is_not_nil(verbose_report.note)
 
     local unresolved = reports.process_write_offs_needing_year(state)
     assert.are.equal(1, #unresolved)
     assert.are.equal("P-NOYEAR", unresolved[1].process_instance_id)
+  end)
+
+  it("event without game_time resolves year from default anchor", function()
+    local store = memory_store.new()
+    local state = ledger.new(store)
+
+    ledger.apply_design_start(state, "D1", "shirt", "Test", "public", 0)
+    ledger.apply_craft_item(state, "I-ANCHOR", "D1", 40, "{}", nil)
+    ledger.apply_sell_item(state, "S-ANCHOR", "I-ANCHOR", 100, nil)
+    ledger.apply_set_default_game_year(state, 123, 1, "backfill")
+
+    local report = reports.year(state, 123)
+    assert.are.equal(100, report.totals.revenue)
+  end)
+
+  it("explicit game_time overrides default anchor", function()
+    local store = memory_store.new()
+    local state = ledger.new(store)
+
+    ledger.apply_set_default_game_year(state, 122, 1, "backfill")
+    ledger.apply_opening_inventory(state, "ore", 10, 10)
+    ledger.apply_process_start(state, "P-EXPL", "smelt", { ore = 5 }, 10, nil, { year = 124 })
+    ledger.apply_process_complete(state, "P-EXPL", {}, nil, { year = 124 })
+
+    assert.are.equal(60, reports.year(state, 124).totals.process_losses)
+    assert.are.equal(0, reports.year(state, 122).totals.process_losses)
+  end)
+
+  it("PROCESS_SET_GAME_TIME override takes precedence over default anchor", function()
+    local store = memory_store.new()
+    local state = ledger.new(store)
+
+    ledger.apply_set_default_game_year(state, 122, 1, "backfill")
+    ledger.apply_opening_inventory(state, "ore", 10, 10)
+    ledger.apply_process_start(state, "P-OVR-DEF", "smelt", { ore = 5 }, 10)
+    ledger.apply_process_complete(state, "P-OVR-DEF", {})
+    ledger.apply_process_set_game_time(state, "P-OVR-DEF", { year = 123 }, "write_off", "override")
+
+    assert.are.equal(60, reports.year(state, 123).totals.process_losses)
+    assert.are.equal(0, reports.year(state, 122).totals.process_losses)
   end)
 
   it("process report shows inputs, outputs, costs and write-off", function()

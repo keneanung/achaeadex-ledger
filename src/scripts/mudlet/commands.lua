@@ -550,6 +550,10 @@ local help_topics = {
     purpose = "Suggest prices from craft cost basis (advisory only).",
     commands = {
       {
+        usage = "adex price quote <source_id_or_alias> [--qty <n>] [--tier low|mid|high|all] [--round <gold>] [--time <hours>] [--extra <gold>] [--materials k=v,...]",
+        example = "adex price quote 1234 --qty 2 --tier mid --time 0.5 --extra 50"
+      },
+      {
         usage = "adex price suggest <item_id>",
         example = "adex price suggest I-20260215-0001"
       },
@@ -660,6 +664,20 @@ local help_topics = {
         example = "adex maintenance rebuild"
       }
     }
+  },
+  time = {
+    title = "Time",
+    purpose = "Set default in-game year anchors and inspect year resolution stats.",
+    commands = {
+      {
+        usage = "adex time set-default-year <year> [--from-event <event_id>] [--note <text>]",
+        example = "adex time set-default-year 998 --from-event 1"
+      },
+      {
+        usage = "adex time stats",
+        example = "adex time stats"
+      }
+    }
   }
 }
 
@@ -700,7 +718,7 @@ function commands.help(topic)
     })
 
     render.section("Topics")
-    local order = { "inv", "broker", "pattern", "design", "source", "item", "order", "process", "craft", "forge", "augment", "sell", "report", "list", "price", "sim", "config", "maintenance" }
+    local order = { "inv", "broker", "pattern", "design", "source", "item", "order", "process", "craft", "forge", "augment", "sell", "report", "list", "price", "sim", "config", "maintenance", "time" }
     local rows = {}
     for _, topic_name in ipairs(order) do
       local entry = help_topics[topic_name]
@@ -726,7 +744,7 @@ function commands.help(topic)
   out_plain("  operational cost: material WAC + fees + time cost per item")
   out_plain("  true profit: profit after design and pattern capital recovery")
   out_plain("Commands:")
-  local order = { "inv", "broker", "pattern", "design", "source", "item", "order", "process", "craft", "forge", "augment", "sell", "report", "list", "price", "sim", "config", "maintenance" }
+  local order = { "inv", "broker", "pattern", "design", "source", "item", "order", "process", "craft", "forge", "augment", "sell", "report", "list", "price", "sim", "config", "maintenance", "time" }
   for _, topic_name in ipairs(order) do
     local entry = help_topics[topic_name]
     if entry then
@@ -855,6 +873,68 @@ function commands.handle(input)
     return
   end
 
+  if cmd == "time" and tokens[2] == "set-default-year" then
+    local year = tonumber(tokens[3])
+    local args, flags = parse_flags(tokens, 4)
+    local parse_err = validate_known_flags(flags, { "from-event", "note" }) or validate_no_extra_args(args)
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
+    if not year then
+      error_out("usage: adex time set-default-year <year> [--from-event <event_id>] [--note <text>]")
+      return
+    end
+
+    local from_event = flags["from-event"] and tonumber(flags["from-event"]) or 1
+    if not from_event or from_event <= 0 then
+      error_out("--from-event must be a positive integer")
+      return
+    end
+
+    ledger.apply_set_default_game_year(state, year, from_event, flags.note)
+    out("OK")
+    return
+  end
+
+  if cmd == "time" and tokens[2] == "stats" then
+    local args, flags = parse_flags(tokens, 3)
+    local parse_err = validate_known_flags(flags, {}) or validate_no_extra_args(args)
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
+
+    local function count_unresolved(tbl, field)
+      local unresolved = 0
+      local total = 0
+      for _, row in pairs(tbl or {}) do
+        total = total + 1
+        if row[field] == nil then
+          unresolved = unresolved + 1
+        end
+      end
+      return unresolved, total
+    end
+
+    local sales_unresolved, sales_total = count_unresolved(state.sales, "resolved_game_year")
+    local commodity_unresolved, commodity_total = count_unresolved(state.commodity_sales, "resolved_game_year")
+    local writeoff_unresolved, writeoff_total = count_unresolved(state.process_write_offs, "resolved_game_year")
+    local settlement_unresolved, settlement_total = count_unresolved(state.order_settlements, "resolved_game_year")
+    local external_unresolved, external_total = count_unresolved(state.external_items, "acquired_resolved_game_year")
+
+    render.section("Time Resolution Stats")
+    render.kv_block({
+      { label = "Default year anchors", value = tostring(#(state.ledger_game_year_defaults or {})) },
+      { label = "Sales unresolved", value = tostring(sales_unresolved) .. "/" .. tostring(sales_total) },
+      { label = "Commodity sales unresolved", value = tostring(commodity_unresolved) .. "/" .. tostring(commodity_total) },
+      { label = "Process write-offs unresolved", value = tostring(writeoff_unresolved) .. "/" .. tostring(writeoff_total) },
+      { label = "Order settlements unresolved", value = tostring(settlement_unresolved) .. "/" .. tostring(settlement_total) },
+      { label = "External items unresolved", value = tostring(external_unresolved) .. "/" .. tostring(external_total) }
+    })
+    return
+  end
+
   if cmd == "inv" and tokens[2] == "init" then
     local commodity = tokens[3]
     local qty = tonumber(tokens[4])
@@ -863,7 +943,8 @@ function commands.handle(input)
       error_out("usage: adex inv init <commodity> <qty> <unit_cost>")
       return
     end
-    ledger.apply_opening_inventory(state, commodity, qty, unit_cost)
+    local game_time = get_game_time()
+    ledger.apply_opening_inventory(state, commodity, qty, unit_cost, game_time)
     out("OK")
     return
   end
@@ -876,7 +957,8 @@ function commands.handle(input)
       error_out("usage: adex broker buy <commodity> <qty> <unit_cost>")
       return
     end
-    ledger.apply_broker_buy(state, commodity, qty, unit_cost)
+    local game_time = get_game_time()
+    ledger.apply_broker_buy(state, commodity, qty, unit_cost, game_time)
     out("OK")
     return
   end
@@ -905,9 +987,11 @@ function commands.handle(input)
       out("created_id: " .. tostring(sale_id))
     end
 
+    local game_time = get_game_time()
     local _, profit = ledger.apply_broker_sell(state, commodity, qty, unit_price, {
       sale_id = sale_id,
-      order_id = order_id
+      order_id = order_id,
+      game_time = game_time
     })
     out("profit: " .. tostring(profit))
     out("OK")
@@ -1141,7 +1225,8 @@ function commands.handle(input)
       error_out("usage: adex design cost <design_id> <amount> <kind>")
       return
     end
-    ledger.apply_design_cost(state, design_id, amount, kind)
+    local game_time = get_game_time()
+    ledger.apply_design_cost(state, design_id, amount, kind, game_time)
     out("OK")
     return
   end
@@ -1153,7 +1238,8 @@ function commands.handle(input)
       error_out("usage: adex design set-fee <design_id> <amount>")
       return
     end
-    ledger.apply_design_set_fee(state, design_id, amount)
+    local game_time = get_game_time()
+    ledger.apply_design_set_fee(state, design_id, amount, game_time)
     out("OK")
     return
   end
@@ -1367,10 +1453,12 @@ function commands.handle(input)
       expires_at = os.date("!%Y-%m-%dT%H:%M:%SZ", os.time() + (expires_minutes * 60))
     end
 
+    local game_time = get_game_time()
     ledger.apply_forge_fire(state, forge_session_id, source_id, {
       coal_cost_gold = coal_cost,
       expires_at = expires_at,
-      note = note
+      note = note,
+      game_time = game_time
     })
     out("OK")
     return
@@ -1383,7 +1471,8 @@ function commands.handle(input)
       error_out("usage: adex forge attach <forge_session_id> <item_id>")
       return
     end
-    ledger.apply_forge_attach(state, forge_session_id, item_id)
+    local game_time = get_game_time()
+    ledger.apply_forge_attach(state, forge_session_id, item_id, game_time)
     out("OK")
     return
   end
@@ -1402,7 +1491,8 @@ function commands.handle(input)
       error_out("usage: adex forge close <forge_session_id> [--method cost_weighted] [--note <text>]")
       return
     end
-    ledger.apply_forge_close(state, forge_session_id, method, note)
+    local game_time = get_game_time()
+    ledger.apply_forge_close(state, forge_session_id, method, note, game_time)
     out("OK")
     return
   end
@@ -1420,7 +1510,8 @@ function commands.handle(input)
       error_out("usage: adex forge expire <forge_session_id> [--note <text>]")
       return
     end
-    ledger.apply_forge_expire(state, forge_session_id, note)
+    local game_time = get_game_time()
+    ledger.apply_forge_expire(state, forge_session_id, note, game_time)
     out("OK")
     return
   end
@@ -1483,6 +1574,7 @@ function commands.handle(input)
 
     local time_cost_per_hour = config.get_time_cost_per_hour and config.get_time_cost_per_hour() or (tonumber(config.get("time_cost_per_hour")) or 0)
     local time_cost = math.floor((time_hours or 0) * time_cost_per_hour)
+    local game_time = get_game_time()
     ledger.apply_source_craft_auto(state, item_id, source_id, "skill", {
       source_type = "forging",
       materials = materials,
@@ -1491,7 +1583,8 @@ function commands.handle(input)
       allow_estimated = materials == nil and not flags.cost,
       time_hours = time_hours,
       time_cost_gold = time_cost,
-      note = note
+      note = note,
+      game_time = game_time
     })
     out("OK")
     return
@@ -1540,12 +1633,14 @@ function commands.handle(input)
 
     local time_cost_per_hour = config.get_time_cost_per_hour and config.get_time_cost_per_hour() or (tonumber(config.get("time_cost_per_hour")) or 0)
     local time_cost = math.floor((time_hours or 0) * time_cost_per_hour)
+    local game_time = get_game_time()
     ledger.apply_augment_item(state, new_item_id, source_id, target_item_id, {
       materials = materials,
       fee_gold = fee,
       time_cost_gold = time_cost,
       appearance_key = appearance_key,
-      note = note
+      note = note,
+      game_time = game_time
     })
     out("OK")
     return
@@ -1592,7 +1687,8 @@ function commands.handle(input)
       return
     end
 
-    ledger.apply_item_add_external(state, item_id, name, basis_gold, basis_source, flags.note)
+    local game_time = get_game_time()
+    ledger.apply_item_add_external(state, item_id, name, basis_gold, basis_source, flags.note, nil, game_time)
     out("OK")
     return
   end
@@ -1617,7 +1713,8 @@ function commands.handle(input)
       end)
       out("created_id: " .. tostring(order_id))
     end
-    ledger.apply_order_create(state, order_id, customer, note)
+    local game_time = get_game_time()
+    ledger.apply_order_create(state, order_id, customer, note, game_time)
     out("OK")
     return
   end
@@ -1629,7 +1726,8 @@ function commands.handle(input)
       error_out("usage: adex order add-item <order_id> <item_id>")
       return
     end
-    ledger.apply_order_add_item(state, order_id, item_id)
+    local game_time = get_game_time()
+    ledger.apply_order_add_item(state, order_id, item_id, game_time)
     out("OK")
     return
   end
@@ -1689,7 +1787,8 @@ function commands.handle(input)
       error_out("usage: adex order add <order_id> <sale_id>")
       return
     end
-    ledger.apply_order_add_sale(state, order_id, sale_id)
+    local game_time = get_game_time()
+    ledger.apply_order_add_sale(state, order_id, sale_id, game_time)
     out("OK")
     return
   end
@@ -1700,7 +1799,8 @@ function commands.handle(input)
       error_out("usage: adex order close <order_id>")
       return
     end
-    ledger.apply_order_close(state, order_id)
+    local game_time = get_game_time()
+    ledger.apply_order_close(state, order_id, game_time)
     out("OK")
     return
   end
@@ -1911,7 +2011,8 @@ function commands.handle(input)
       error_out("usage: adex craft resolve <item_id> <design_id>")
       return
     end
-    ledger.apply_craft_resolve(state, item_id, design_id, "manual")
+    local game_time = get_game_time()
+    ledger.apply_craft_resolve(state, item_id, design_id, "manual", game_time)
     out("OK")
     return
   end
@@ -2015,6 +2116,7 @@ function commands.handle(input)
       render.warning("WARNING: Manual craft cost used; no materials recorded.")
     end
 
+    local game_time = get_game_time()
     if source_id then
       ledger.apply_source_craft_auto(state, item_id, source_id, source_kind or "skill", {
         source_type = source_type,
@@ -2022,7 +2124,8 @@ function commands.handle(input)
         appearance_key = appearance_key,
         manual_cost = manual_cost,
         time_cost_gold = time_cost,
-        time_hours = time_hours
+        time_hours = time_hours,
+        game_time = game_time
       })
     else
       ledger.apply_craft_item_auto(state, item_id, design_id, {
@@ -2030,7 +2133,8 @@ function commands.handle(input)
         appearance_key = appearance_key,
         manual_cost = manual_cost,
         time_cost_gold = time_cost,
-        time_hours = time_hours
+        time_hours = time_hours,
+        game_time = game_time
       })
     end
     out("OK")
@@ -2777,22 +2881,22 @@ function commands.handle(input)
       return
     end
 
-    local item = state.crafted_items[item_id]
-    if not item then
-      error_out("item not found")
+    local ok, item_suggestion = pcall(function()
+      return pricing.suggest_item(state, item_id)
+    end)
+    if not ok then
+      error_out(item_suggestion)
       return
     end
 
-    local design = item.source_id and state.production_sources[item.source_id] or nil
-    local policy = design and design.pricing_policy or nil
-    local policy_used = policy and "design" or "default"
-    local result = pricing.suggest_prices(item.operational_cost_gold, policy)
+    local result = item_suggestion.suggestion
+    local resolved_source_id = item_suggestion.resolved_source_id or ""
 
     render.section("Price Suggest")
     render.kv_block({
       { label = "Item", value = item_id },
-      { label = "Design", value = item.source_id or "" },
-      { label = "Policy", value = policy_used }
+      { label = "Design/Source", value = resolved_source_id },
+      { label = "Policy", value = item_suggestion.policy_used }
     })
     render.kv_block({
       { label = "Base cost", value = tostring(result.base_cost_gold) },
@@ -2807,6 +2911,152 @@ function commands.handle(input)
       { key = "tier", label = "Tier", nowrap = true, min = 4 },
       { key = "price", label = "Suggested", align = "right", min = 9 }
     })
+    return
+  end
+
+  if cmd == "price" and tokens[2] == "quote" then
+    local source_id_or_alias = tokens[3]
+    local args, flags = parse_flags(tokens, 4)
+    local parse_err = validate_known_flags(flags, { "qty", "tier", "round", "time", "extra", "materials" }) or validate_no_extra_args(args)
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
+
+    if not source_id_or_alias then
+      error_out("usage: adex price quote <source_id_or_alias> [--qty <n>] [--tier low|mid|high|all] [--round <gold>] [--time <hours>] [--extra <gold>] [--materials k=v,...]")
+      return
+    end
+
+    local qty = flags.qty and tonumber(flags.qty) or 1
+    local tier = flags.tier or "all"
+    local round_to = flags.round and tonumber(flags.round) or nil
+    local time_hours = flags.time and tonumber(flags.time) or 0
+    local extra_gold = flags.extra and tonumber(flags.extra) or 0
+
+    if qty == nil or qty <= 0 then
+      error_out("--qty must be > 0")
+      return
+    end
+    if time_hours == nil or time_hours < 0 then
+      error_out("--time must be >= 0")
+      return
+    end
+    if extra_gold == nil or extra_gold < 0 then
+      error_out("--extra must be >= 0")
+      return
+    end
+    if tier ~= "low" and tier ~= "mid" and tier ~= "high" and tier ~= "all" then
+      error_out("usage: adex price quote <source_id_or_alias> [--qty <n>] [--tier low|mid|high|all] [--round <gold>] [--time <hours>] [--extra <gold>] [--materials k=v,...]")
+      return
+    end
+
+    local materials = nil
+    if flags.materials then
+      materials = parse_kv_list(flags.materials)
+      local ok, err = validate_materials(materials)
+      if not ok then
+        error_out(err)
+        return
+      end
+    end
+
+    local time_cost_per_hour = config.get_time_cost_per_hour and config.get_time_cost_per_hour() or (tonumber(config.get("time_cost_per_hour")) or 0)
+    local ok, quote = pcall(function()
+      return pricing.quote_source(state, source_id_or_alias, {
+        qty = qty,
+        tier = tier,
+        round = round_to,
+        time_hours = time_hours,
+        extra_gold = extra_gold,
+        materials = materials,
+        time_cost_per_hour = time_cost_per_hour
+      })
+    end)
+    if not ok then
+      error_out(quote)
+      return
+    end
+
+    local fmt = render.format_gold or tostring
+    render.section("Price Quote")
+    render.kv_block({
+      { label = "Input", value = source_id_or_alias },
+      { label = "Resolved source_id", value = quote.resolved_source_id },
+      { label = "Matched alias", value = quote.matched_alias_id or "-" },
+      { label = "Source", value = quote.source_name or "" },
+      { label = "Type", value = quote.source_type or "" },
+      { label = "Materials", value = quote.materials_source == "explicit" and "override" or "BOM" },
+      { label = "Policy", value = quote.policy_used },
+      { label = "Qty", value = tostring(quote.qty) }
+    })
+
+    render.section("Material Basis")
+    local material_rows = {}
+    for _, row in ipairs(quote.material_rows or {}) do
+      table.insert(material_rows, {
+        commodity = row.commodity,
+        qty = tostring(row.qty),
+        unit_wac = fmt(row.unit_wac),
+        subtotal = fmt(row.subtotal)
+      })
+    end
+    render.table(material_rows, {
+      { key = "commodity", label = "Commodity", nowrap = true, min = 12 },
+      { key = "qty", label = "Qty", align = "right", min = 6 },
+      { key = "unit_wac", label = "Unit WAC", align = "right", min = 8 },
+      { key = "subtotal", label = "Subtotal", align = "right", min = 8 }
+    })
+
+    render.section("Base Cost")
+    render.kv_block({
+      { label = "Materials", value = fmt(quote.components.materials_cost or 0) },
+      { label = "Per-item fee", value = fmt(quote.components.per_item_fee or 0) },
+      { label = "Time cost", value = fmt(quote.components.time_cost or 0) },
+      { label = "Extra", value = fmt(quote.components.extra or 0) },
+      { label = "Base cost", value = fmt(quote.base_cost or 0) },
+      { label = "Rounded base", value = fmt(quote.rounded_base or 0) }
+    })
+
+    render.section("Suggested Prices")
+    local tier_rows = {}
+    if quote.per_unit.low then
+      table.insert(tier_rows, {
+        tier = "low",
+        per_unit = fmt(quote.per_unit.low),
+        total = fmt(quote.totals.low or 0)
+      })
+    end
+    if quote.per_unit.mid then
+      table.insert(tier_rows, {
+        tier = "mid",
+        per_unit = fmt(quote.per_unit.mid),
+        total = fmt(quote.totals.mid or 0)
+      })
+    end
+    if quote.per_unit.high then
+      table.insert(tier_rows, {
+        tier = "high",
+        per_unit = fmt(quote.per_unit.high),
+        total = fmt(quote.totals.high or 0)
+      })
+    end
+    render.table(tier_rows, {
+      { key = "tier", label = "Tier", nowrap = true, min = 4 },
+      { key = "per_unit", label = "Per Unit", align = "right", min = 9 },
+      { key = "total", label = "Total", align = "right", min = 9 }
+    })
+
+    if quote.qty > 1 then
+      render.kv_block({
+        { label = "Total base cost", value = fmt(quote.totals.base_cost or 0) }
+      })
+    end
+
+    for _, warning in ipairs(quote.warnings or {}) do
+      render.warning(warning)
+    end
+
     return
   end
 

@@ -285,4 +285,29 @@ describe("EventStore", function()
     assert.is_not_nil(row.game_time_json)
     assert.are.equal(998, tonumber(row.game_time_year))
   end)
+
+  it("rebuild deterministically recomputes resolved_game_year from default anchor", function()
+    if not luasql then
+      pending("LuaSQL sqlite3 not available")
+      return
+    end
+
+    local db_path = os.tmpname()
+    local store = sqlite_store.new(db_path)
+    local state = ledger.new(store)
+
+    ledger.apply_design_start(state, "D-YR", "shirt", "Yearful", "public", 0)
+    ledger.apply_craft_item(state, "I-YR", "D-YR", 40, "{}", nil)
+    ledger.apply_sell_item(state, "S-YR", "I-YR", 100, nil)
+    ledger.apply_set_default_game_year(state, 998, 1, "coarse backfill")
+
+    store:rebuild_projections()
+
+    local cur = assert(store.conn:execute("SELECT resolved_game_year FROM sales WHERE sale_id = 'S-YR'"))
+    local row = cur:fetch({}, "a")
+    cur:close()
+
+    assert.is_not_nil(row)
+    assert.are.equal(998, tonumber(row.resolved_game_year))
+  end)
 end)

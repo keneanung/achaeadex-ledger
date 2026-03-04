@@ -5,6 +5,14 @@ _G.AchaeadexLedger.Core = _G.AchaeadexLedger.Core or {}
 
 local pricing = _G.AchaeadexLedger.Core.Pricing or {}
 
+local function get_inventory()
+  if not _G.AchaeadexLedger or not _G.AchaeadexLedger.Core or not _G.AchaeadexLedger.Core.Inventory then
+    error("AchaeadexLedger.Core.Inventory is not loaded")
+  end
+
+  return _G.AchaeadexLedger.Core.Inventory
+end
+
 local function round_up(value, step)
   if step <= 0 then
     return value
@@ -73,6 +81,191 @@ local function build_selected_tiers(tier)
   return { low = true, mid = true, high = true }
 end
 
+function pricing.resolve_source_identifier(state, source_id_or_alias)
+  assert(type(state) == "table", "state must be a table")
+  assert(type(source_id_or_alias) == "string", "source_id_or_alias must be a string")
+
+  local source = state.production_sources and state.production_sources[source_id_or_alias] or nil
+  if source then
+    return {
+      input_id = source_id_or_alias,
+      source_id = source_id_or_alias,
+      source = source,
+      matched_alias_id = nil
+    }
+  end
+
+  local alias = state.design_aliases and state.design_aliases[source_id_or_alias] or nil
+  if alias and alias.source_id then
+    source = state.production_sources and state.production_sources[alias.source_id] or nil
+    if source then
+      return {
+        input_id = source_id_or_alias,
+        source_id = alias.source_id,
+        source = source,
+        matched_alias_id = source_id_or_alias
+      }
+    end
+  end
+
+  return nil, "source not found for '" .. tostring(source_id_or_alias) .. "'. Try 'adex list sources' or 'adex list designs' and check aliases."
+end
+
+local function resolve_source_for_item(state, item)
+  if not item or not item.source_id then
+    return nil
+  end
+  local resolved = pricing.resolve_source_identifier(state, item.source_id)
+  return resolved
+end
+
+function pricing.suggest_item(state, item_id)
+  assert(type(state) == "table", "state must be a table")
+  assert(type(item_id) == "string", "item_id must be a string")
+
+  local item = state.crafted_items and state.crafted_items[item_id] or nil
+  if not item then
+    error("item not found")
+  end
+
+  local resolved = resolve_source_for_item(state, item)
+  local source = resolved and resolved.source or nil
+  local policy = source and source.pricing_policy or pricing.default_policy()
+  local policy_used = source and source.pricing_policy and "source" or "default"
+  local suggestion = pricing.suggest_prices(item.operational_cost_gold, policy)
+
+  return {
+    item_id = item_id,
+    item = item,
+    resolved_source_id = resolved and resolved.source_id or nil,
+    matched_alias_id = resolved and resolved.matched_alias_id or nil,
+    policy_used = policy_used,
+    suggestion = suggestion
+  }
+end
+
+function pricing.quote_source(state, source_id_or_alias, opts)
+  assert(type(state) == "table", "state must be a table")
+  assert(type(source_id_or_alias) == "string", "source_id_or_alias must be a string")
+
+  opts = opts or {}
+  local qty = tonumber(opts.qty) or 1
+  local tier = opts.tier or "all"
+  local round_override = opts.round and tonumber(opts.round) or nil
+  local time_hours = tonumber(opts.time_hours) or 0
+  local extra_gold = tonumber(opts.extra_gold) or 0
+  local time_cost_per_hour = tonumber(opts.time_cost_per_hour) or 0
+
+  if qty <= 0 then
+    error("qty must be > 0")
+  end
+  if time_hours < 0 then
+    error("time must be >= 0")
+  end
+  if extra_gold < 0 then
+    error("extra must be >= 0")
+  end
+  if tier ~= "low" and tier ~= "mid" and tier ~= "high" and tier ~= "all" then
+    error("tier must be one of low|mid|high|all")
+  end
+
+  local resolved, err = pricing.resolve_source_identifier(state, source_id_or_alias)
+  if not resolved then
+    error(err)
+  end
+
+  local source = resolved.source
+  local materials = opts.materials or source.bom
+  if not materials then
+    error("cannot quote " .. tostring(resolved.source_id) .. ": no BOM and no --materials override")
+  end
+
+  local inventory = get_inventory()
+  local material_rows = {}
+  local warnings = {}
+  local materials_cost = 0
+  local missing_wac_count = 0
+
+  local keys = {}
+  for commodity in pairs(materials) do
+    table.insert(keys, commodity)
+  end
+  table.sort(keys)
+
+  for _, commodity in ipairs(keys) do
+    local qty_needed = tonumber(materials[commodity]) or 0
+    local unit_wac = inventory.get_unit_cost(state.inventory, commodity) or 0
+    local subtotal = qty_needed * unit_wac
+    if unit_wac <= 0 and qty_needed > 0 then
+      missing_wac_count = missing_wac_count + 1
+      table.insert(warnings, "WARNING: Missing WAC for " .. tostring(commodity) .. " (use adex inv init/broker buy)")
+    end
+    table.insert(material_rows, {
+      commodity = commodity,
+      qty = qty_needed,
+      unit_wac = unit_wac,
+      subtotal = subtotal
+    })
+    materials_cost = materials_cost + subtotal
+  end
+
+  local per_item_fee = tonumber(source.per_item_fee_gold) or 0
+  local time_cost = math.floor(time_hours * time_cost_per_hour)
+  local base_cost = materials_cost + per_item_fee + time_cost + extra_gold
+  local policy = source.pricing_policy or pricing.default_policy()
+  local policy_used = source.pricing_policy and "source" or "default"
+
+  if round_override and round_override > 0 then
+    policy = {
+      round_to_gold = round_override,
+      tiers = policy.tiers
+    }
+  end
+
+  local suggested = pricing.suggest_prices(base_cost, policy)
+  local selected_tiers = build_selected_tiers(tier)
+  local per_unit = {
+    low = selected_tiers.low and suggested.suggested.low or nil,
+    mid = selected_tiers.mid and suggested.suggested.mid or nil,
+    high = selected_tiers.high and suggested.suggested.high or nil
+  }
+
+  local totals = {
+    qty = qty,
+    base_cost = base_cost * qty,
+    low = per_unit.low and (per_unit.low * qty) or nil,
+    mid = per_unit.mid and (per_unit.mid * qty) or nil,
+    high = per_unit.high and (per_unit.high * qty) or nil
+  }
+
+  return {
+    input_id = source_id_or_alias,
+    resolved_source_id = resolved.source_id,
+    matched_alias_id = resolved.matched_alias_id,
+    source_name = source.name,
+    source_type = source.source_type,
+    source_kind = source.source_kind,
+    policy_used = policy_used,
+    material_rows = material_rows,
+    materials_source = opts.materials and "explicit" or "design_bom",
+    missing_wac_count = missing_wac_count,
+    warnings = warnings,
+    components = {
+      materials_cost = materials_cost,
+      per_item_fee = per_item_fee,
+      time_cost = time_cost,
+      extra = extra_gold
+    },
+    base_cost = suggested.base_cost_gold,
+    rounded_base = suggested.rounded_base_gold,
+    tier = tier,
+    qty = qty,
+    per_unit = per_unit,
+    totals = totals,
+    round_to_gold = policy.round_to_gold
+  }
+end
+
 local function is_item_sold(state, item_id)
   for _, sale in pairs(state.sales or {}) do
     if sale.item_id == item_id then
@@ -135,7 +328,8 @@ function pricing.suggest_order(state, order_id, opts)
       if sold and not include_sold then
         excluded_sold_count = excluded_sold_count + 1
       else
-        local source = item.source_id and state.production_sources and state.production_sources[item.source_id] or nil
+        local resolved = resolve_source_for_item(state, item)
+        local source = resolved and resolved.source or nil
         local policy = source and source.pricing_policy or pricing.default_policy()
         local policy_used = source and source.pricing_policy and "source" or "default"
 
@@ -159,12 +353,12 @@ function pricing.suggest_order(state, order_id, opts)
 
         table.insert(item_rows, {
           item_id = item_id,
-          source_id = item.source_id or "(unresolved)",
+          source_id = resolved and resolved.source_id or item.source_id or "(unresolved)",
           base_cost_gold = result.base_cost_gold,
           suggested_low = suggested_low,
           suggested_mid = suggested_mid,
           suggested_high = suggested_high,
-          notes = table.concat(notes, ", ")
+          notes = table.concat(notes, ", ") .. (resolved and resolved.matched_alias_id and (", alias=" .. tostring(resolved.matched_alias_id)) or "")
         })
 
         included_count = included_count + 1

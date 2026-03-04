@@ -446,6 +446,55 @@ describe("Schema Migration", function()
       db:close()
     end)
   end)
+
+  describe("migration v12", function()
+    it("should add resolved game year columns and ledger_game_year_defaults table", function()
+      local db = lsqlite3.open_memory()
+      schema.migrate(db, 12)
+
+      local sales_columns = {}
+      local stmt = db:prepare("PRAGMA table_info(sales)")
+      for row in stmt:nrows() do
+        sales_columns[row.name] = true
+      end
+      stmt:finalize()
+      assert.is_true(sales_columns.resolved_game_year)
+
+      local process_columns = {}
+      stmt = db:prepare("PRAGMA table_info(process_write_offs)")
+      for row in stmt:nrows() do
+        process_columns[row.name] = true
+      end
+      stmt:finalize()
+      assert.is_true(process_columns.resolved_game_year)
+
+      local external_columns = {}
+      stmt = db:prepare("PRAGMA table_info(external_items)")
+      for row in stmt:nrows() do
+        external_columns[row.name] = true
+      end
+      stmt:finalize()
+      assert.is_true(external_columns.acquired_resolved_game_year)
+
+      local settlement_columns = {}
+      stmt = db:prepare("PRAGMA table_info(order_settlements)")
+      for row in stmt:nrows() do
+        settlement_columns[row.name] = true
+      end
+      stmt:finalize()
+      assert.is_true(settlement_columns.resolved_game_year)
+
+      local defaults_table = false
+      stmt = db:prepare([[SELECT name FROM sqlite_master WHERE type='table' AND name='ledger_game_year_defaults']])
+      for _ in stmt:nrows() do
+        defaults_table = true
+      end
+      stmt:finalize()
+      assert.is_true(defaults_table)
+
+      db:close()
+    end)
+  end)
   
   describe("migrate function", function()
     it("should migrate from version 0 to 1", function()
@@ -487,8 +536,8 @@ describe("Schema Migration", function()
       
       local version = schema.migrate(db)
       
-      -- Should migrate to the latest version (currently 11)
-      assert.are.equal(11, version)
+      -- Should migrate to the latest version (currently 12)
+      assert.are.equal(12, version)
       
       db:close()
     end)

@@ -52,6 +52,75 @@ local function fetch_one(conn, sql)
   return row
 end
 
+local function payload_game_year(payload)
+  if not payload or not payload.game_time or payload.game_time.year == nil then
+    return nil
+  end
+  return tonumber(payload.game_time.year)
+end
+
+local function resolve_default_game_year(conn, event_id)
+  if not event_id then
+    return nil
+  end
+  local row = fetch_one(conn, string.format(
+    "SELECT default_year FROM ledger_game_year_defaults WHERE effective_from_event_id <= %s ORDER BY effective_from_event_id DESC LIMIT 1",
+    sql_value(event_id)
+  ))
+  if not row then
+    return nil
+  end
+  return tonumber(row.default_year)
+end
+
+local function resolve_process_override_year(conn, process_instance_id, scope)
+  if not process_instance_id then
+    return nil
+  end
+  local json = get_json()
+  local row = fetch_one(conn, string.format(
+    "SELECT game_time_json FROM process_game_time_overrides WHERE process_instance_id = %s AND scope = %s",
+    sql_value(process_instance_id),
+    sql_value(scope)
+  ))
+  if row and row.game_time_json then
+    local decoded = json.decode(row.game_time_json)
+    if decoded and decoded.year then
+      return tonumber(decoded.year)
+    end
+  end
+
+  row = fetch_one(conn, string.format(
+    "SELECT game_time_json FROM process_game_time_overrides WHERE process_instance_id = %s AND scope = 'all'",
+    sql_value(process_instance_id)
+  ))
+  if row and row.game_time_json then
+    local decoded = json.decode(row.game_time_json)
+    if decoded and decoded.year then
+      return tonumber(decoded.year)
+    end
+  end
+
+  return nil
+end
+
+local function resolve_game_year(conn, event, payload, opts)
+  opts = opts or {}
+  local year = payload_game_year(payload)
+  if year then
+    return year
+  end
+
+  if opts.process_instance_id and opts.process_scope then
+    local override = resolve_process_override_year(conn, opts.process_instance_id, opts.process_scope)
+    if override then
+      return override
+    end
+  end
+
+  return resolve_default_game_year(conn, event and event.id or nil)
+end
+
 local function resolve_source_id(conn, source_id)
   local row = fetch_one(conn, "SELECT source_id FROM production_sources WHERE source_id = " .. sql_value(source_id))
   if row and row.source_id then
@@ -182,27 +251,33 @@ function projector.apply(conn, event)
   end
 
   if event_type == "ITEM_REGISTER_EXTERNAL" then
+    local resolved_game_year = resolve_game_year(conn, event, payload)
     exec_sql(conn, string.format(
-      "INSERT OR REPLACE INTO external_items (item_id, name, acquired_at, basis_gold, basis_source, status, note) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+      "INSERT OR REPLACE INTO external_items (item_id, name, acquired_at, basis_gold, basis_source, status, note, acquired_resolved_game_year, source_event_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
       sql_value(payload.item_id),
       sql_value(payload.name),
       sql_value(payload.acquired_at or ts),
       sql_value(payload.basis_gold or 0),
       sql_value(payload.basis_source or "unknown"),
       sql_value(payload.status or "active"),
-      sql_value(payload.note)
+      sql_value(payload.note),
+      sql_value(resolved_game_year),
+      sql_value(event.id)
     ))
     return
   end
 
   if event_type == "ITEM_UPDATE_EXTERNAL" then
+    local resolved_game_year = resolve_game_year(conn, event, payload)
     exec_sql(conn, string.format(
-      "UPDATE external_items SET name = COALESCE(%s, name), basis_gold = COALESCE(%s, basis_gold), basis_source = COALESCE(%s, basis_source), status = COALESCE(%s, status), note = COALESCE(%s, note) WHERE item_id = %s",
+      "UPDATE external_items SET name = COALESCE(%s, name), basis_gold = COALESCE(%s, basis_gold), basis_source = COALESCE(%s, basis_source), status = COALESCE(%s, status), note = COALESCE(%s, note), acquired_resolved_game_year = COALESCE(%s, acquired_resolved_game_year), source_event_id = COALESCE(%s, source_event_id) WHERE item_id = %s",
       sql_value(payload.name),
       sql_value(payload.basis_gold),
       sql_value(payload.basis_source),
       sql_value(payload.status),
       sql_value(payload.note),
+      sql_value(resolved_game_year),
+      sql_value(event.id),
       sql_value(payload.item_id)
     ))
     return
@@ -537,13 +612,16 @@ function projector.apply(conn, event)
   end
 
   if event_type == "FORGE_WRITE_OFF" then
+    local resolved_game_year = resolve_game_year(conn, event, payload)
     exec_sql(conn, string.format(
-      "INSERT INTO forge_write_offs (forge_session_id, amount_gold, created_at, reason, note) VALUES (%s, %s, %s, %s, %s)",
+      "INSERT INTO forge_write_offs (forge_session_id, amount_gold, created_at, reason, note, resolved_game_year, source_event_id) VALUES (%s, %s, %s, %s, %s, %s, %s)",
       sql_value(payload.forge_session_id),
       sql_value(payload.amount_gold or 0),
       sql_value(ts),
       sql_value(payload.reason),
-      sql_value(payload.note)
+      sql_value(payload.note),
+      sql_value(resolved_game_year),
+      sql_value(event.id)
     ))
     return
   end
@@ -567,9 +645,10 @@ function projector.apply(conn, event)
       local game_time = payload.game_time or {}
       local json = get_json()
       local game_time_json = payload.game_time and json.encode(payload.game_time) or nil
+      local resolved_game_year = resolve_game_year(conn, event, payload)
       exec_sql(conn, string.format(
-        "INSERT OR REPLACE INTO sales (sale_id, item_id, sold_at, sale_price_gold, game_time_year, game_time_month, game_time_day, game_time_hour, game_time_minute, game_time_json, settlement_id) " ..
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        "INSERT OR REPLACE INTO sales (sale_id, item_id, sold_at, sale_price_gold, game_time_year, game_time_month, game_time_day, game_time_hour, game_time_minute, game_time_json, settlement_id, resolved_game_year, source_event_id) " ..
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         sql_value(payload.sale_id),
         sql_value(payload.item_id),
         sql_value(payload.sold_at or ts),
@@ -580,7 +659,9 @@ function projector.apply(conn, event)
         sql_value(game_time.hour),
         sql_value(game_time.minute),
         sql_value(game_time_json),
-        sql_value(payload.settlement_id)
+        sql_value(payload.settlement_id),
+        sql_value(resolved_game_year),
+        sql_value(event.id)
       ))
 
       local item_row = fetch_one(conn, "SELECT source_id, source_kind, operational_cost_gold FROM crafted_items WHERE item_id = " .. sql_value(payload.item_id))
@@ -637,13 +718,16 @@ function projector.apply(conn, event)
   end
 
   if event_type == "ORDER_SETTLE" then
+    local resolved_game_year = resolve_game_year(conn, event, payload)
     exec_sql(conn, string.format(
-      "INSERT OR REPLACE INTO order_settlements (settlement_id, order_id, amount_gold, received_at, method) VALUES (%s, %s, %s, %s, %s)",
+      "INSERT OR REPLACE INTO order_settlements (settlement_id, order_id, amount_gold, received_at, method, resolved_game_year, source_event_id) VALUES (%s, %s, %s, %s, %s, %s, %s)",
       sql_value(payload.settlement_id),
       sql_value(payload.order_id),
       sql_value(payload.amount_gold or 0),
       sql_value(payload.received_at or ts),
-      sql_value(payload.method)
+      sql_value(payload.method),
+      sql_value(resolved_game_year),
+      sql_value(event.id)
     ))
     return
   end
@@ -706,14 +790,20 @@ function projector.apply(conn, event)
   if event_type == "PROCESS_WRITE_OFF" then
     local json = get_json()
     local game_time_json = payload.game_time and json.encode(payload.game_time) or nil
+    local resolved_game_year = resolve_game_year(conn, event, payload, {
+      process_instance_id = payload.process_instance_id,
+      process_scope = "write_off"
+    })
     exec_sql(conn, string.format(
-      "INSERT OR REPLACE INTO process_write_offs (process_instance_id, at, amount_gold, reason, note, game_time_json) VALUES (%s, %s, %s, %s, %s, %s)",
+      "INSERT OR REPLACE INTO process_write_offs (process_instance_id, at, amount_gold, reason, note, game_time_json, resolved_game_year, source_event_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
       sql_value(payload.process_instance_id),
       sql_value(ts),
       sql_value(payload.amount_gold or 0),
       sql_value(payload.reason),
       sql_value(payload.note),
-      sql_value(game_time_json)
+      sql_value(game_time_json),
+      sql_value(resolved_game_year),
+      sql_value(event.id)
     ))
     return
   end
@@ -735,6 +825,23 @@ function projector.apply(conn, event)
     return
   end
 
+  if event_type == "LEDGER_SET_DEFAULT_GAME_YEAR" then
+    exec_sql(conn, string.format(
+      "INSERT OR REPLACE INTO ledger_game_year_defaults (effective_from_event_id, default_year, set_at, note) VALUES (%s, %s, %s, %s)",
+      sql_value(payload.effective_from_event_id),
+      sql_value(payload.default_year),
+      sql_value(payload.set_at or ts),
+      sql_value(payload.note)
+    ))
+
+    exec_sql(conn, "UPDATE sales SET resolved_game_year = COALESCE(game_time_year, (SELECT default_year FROM ledger_game_year_defaults d WHERE d.effective_from_event_id <= sales.source_event_id ORDER BY d.effective_from_event_id DESC LIMIT 1))")
+    exec_sql(conn, "UPDATE external_items SET acquired_resolved_game_year = COALESCE((SELECT CAST(json_extract(e.payload_json, '$.game_time.year') AS INTEGER) FROM ledger_events e WHERE e.id = external_items.source_event_id), (SELECT default_year FROM ledger_game_year_defaults d WHERE d.effective_from_event_id <= external_items.source_event_id ORDER BY d.effective_from_event_id DESC LIMIT 1))")
+    exec_sql(conn, "UPDATE order_settlements SET resolved_game_year = COALESCE((SELECT CAST(json_extract(e.payload_json, '$.game_time.year') AS INTEGER) FROM ledger_events e WHERE e.id = order_settlements.source_event_id), (SELECT default_year FROM ledger_game_year_defaults d WHERE d.effective_from_event_id <= order_settlements.source_event_id ORDER BY d.effective_from_event_id DESC LIMIT 1))")
+    exec_sql(conn, "UPDATE forge_write_offs SET resolved_game_year = COALESCE((SELECT CAST(json_extract(e.payload_json, '$.game_time.year') AS INTEGER) FROM ledger_events e WHERE e.id = forge_write_offs.source_event_id), (SELECT default_year FROM ledger_game_year_defaults d WHERE d.effective_from_event_id <= forge_write_offs.source_event_id ORDER BY d.effective_from_event_id DESC LIMIT 1))")
+    exec_sql(conn, "UPDATE process_write_offs SET resolved_game_year = COALESCE(CAST(json_extract(game_time_json, '$.year') AS INTEGER), (SELECT CAST(json_extract(o.game_time_json, '$.year') AS INTEGER) FROM process_game_time_overrides o WHERE o.process_instance_id = process_write_offs.process_instance_id AND o.scope = 'write_off' LIMIT 1), (SELECT CAST(json_extract(o.game_time_json, '$.year') AS INTEGER) FROM process_game_time_overrides o WHERE o.process_instance_id = process_write_offs.process_instance_id AND o.scope = 'all' LIMIT 1), (SELECT default_year FROM ledger_game_year_defaults d WHERE d.effective_from_event_id <= process_write_offs.source_event_id ORDER BY d.effective_from_event_id DESC LIMIT 1))")
+    return
+  end
+
   -- Inventory-only events do not map to domain tables.
   return
 end
@@ -746,6 +853,7 @@ function projector.truncate_domains(conn)
     "forge_session_items",
     "forge_sessions",
     "process_game_time_overrides",
+    "ledger_game_year_defaults",
     "process_write_offs",
     "order_items",
     "order_settlements",

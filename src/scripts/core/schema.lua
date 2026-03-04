@@ -337,6 +337,37 @@ schema.migrations = {
   [11] = [[
     ALTER TABLE sales ADD COLUMN game_time_json TEXT;
     CREATE INDEX IF NOT EXISTS idx_sales_game_time_json ON sales(game_time_json);
+  ]],
+  [12] = [[
+    ALTER TABLE sales ADD COLUMN resolved_game_year INTEGER;
+    ALTER TABLE sales ADD COLUMN source_event_id INTEGER;
+    ALTER TABLE process_write_offs ADD COLUMN resolved_game_year INTEGER;
+    ALTER TABLE process_write_offs ADD COLUMN source_event_id INTEGER;
+    ALTER TABLE external_items ADD COLUMN acquired_resolved_game_year INTEGER;
+    ALTER TABLE external_items ADD COLUMN source_event_id INTEGER;
+    ALTER TABLE order_settlements ADD COLUMN resolved_game_year INTEGER;
+    ALTER TABLE order_settlements ADD COLUMN source_event_id INTEGER;
+    ALTER TABLE forge_write_offs ADD COLUMN resolved_game_year INTEGER;
+    ALTER TABLE forge_write_offs ADD COLUMN source_event_id INTEGER;
+
+    CREATE TABLE IF NOT EXISTS ledger_game_year_defaults (
+      effective_from_event_id INTEGER PRIMARY KEY,
+      default_year INTEGER NOT NULL,
+      set_at TEXT NOT NULL,
+      note TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_sales_resolved_game_year ON sales(resolved_game_year);
+    CREATE INDEX IF NOT EXISTS idx_sales_source_event_id ON sales(source_event_id);
+    CREATE INDEX IF NOT EXISTS idx_process_write_offs_resolved_game_year ON process_write_offs(resolved_game_year);
+    CREATE INDEX IF NOT EXISTS idx_process_write_offs_source_event_id ON process_write_offs(source_event_id);
+    CREATE INDEX IF NOT EXISTS idx_external_items_acquired_resolved_game_year ON external_items(acquired_resolved_game_year);
+    CREATE INDEX IF NOT EXISTS idx_external_items_source_event_id ON external_items(source_event_id);
+    CREATE INDEX IF NOT EXISTS idx_order_settlements_resolved_game_year ON order_settlements(resolved_game_year);
+    CREATE INDEX IF NOT EXISTS idx_order_settlements_source_event_id ON order_settlements(source_event_id);
+    CREATE INDEX IF NOT EXISTS idx_forge_write_offs_resolved_game_year ON forge_write_offs(resolved_game_year);
+    CREATE INDEX IF NOT EXISTS idx_forge_write_offs_source_event_id ON forge_write_offs(source_event_id);
+    CREATE INDEX IF NOT EXISTS idx_ledger_game_year_defaults_default_year ON ledger_game_year_defaults(default_year);
   ]]
 }
 

@@ -142,6 +142,107 @@ local function encode_breakdown(breakdown)
   return "{}"
 end
 
+local function normalize_game_year(game_time)
+  if not game_time or game_time.year == nil then
+    return nil
+  end
+  local year = tonumber(game_time.year)
+  if not year then
+    return nil
+  end
+  return year
+end
+
+local function resolve_default_game_year(state, event_id)
+  if not event_id then
+    return nil
+  end
+  local anchors = state.ledger_game_year_defaults or {}
+  local best_year = nil
+  local best_from = nil
+  for _, row in ipairs(anchors) do
+    local from_id = tonumber(row.effective_from_event_id)
+    if from_id and from_id <= event_id and (best_from == nil or from_id > best_from) then
+      best_from = from_id
+      best_year = tonumber(row.default_year)
+    end
+  end
+  return best_year
+end
+
+local function resolve_process_override_year(state, process_instance_id, scope)
+  if not process_instance_id then
+    return nil
+  end
+  local overrides = state.process_game_time_overrides and state.process_game_time_overrides[process_instance_id] or nil
+  if not overrides then
+    return nil
+  end
+  local scoped = overrides[scope]
+  local scoped_year = scoped and normalize_game_year(scoped.game_time)
+  if scoped_year then
+    return scoped_year
+  end
+  local fallback = overrides.all
+  return fallback and normalize_game_year(fallback.game_time) or nil
+end
+
+local function resolve_event_game_year(state, event, payload, opts)
+  opts = opts or {}
+  local explicit_year = normalize_game_year(payload and payload.game_time)
+  if explicit_year then
+    return explicit_year
+  end
+
+  local process_instance_id = opts.process_instance_id
+  local process_scope = opts.process_scope
+  if process_instance_id and process_scope then
+    local override_year = resolve_process_override_year(state, process_instance_id, process_scope)
+    if override_year then
+      return override_year
+    end
+  end
+
+  return resolve_default_game_year(state, event and event.id or nil)
+end
+
+local function recompute_sale_years(state)
+  for _, sale in pairs(state.sales or {}) do
+    sale.resolved_game_year = resolve_event_game_year(state, { id = sale._event_id }, { game_time = sale.game_time })
+  end
+  for _, sale in pairs(state.commodity_sales or {}) do
+    sale.resolved_game_year = resolve_event_game_year(state, { id = sale._event_id }, { game_time = sale.game_time })
+  end
+end
+
+local function recompute_process_write_off_years(state)
+  for _, row in ipairs(state.process_write_offs or {}) do
+    row.resolved_game_year = resolve_event_game_year(state, { id = row._event_id }, { game_time = row.game_time }, {
+      process_instance_id = row.process_instance_id,
+      process_scope = "write_off"
+    })
+  end
+end
+
+local function recompute_external_item_years(state)
+  for _, item in pairs(state.external_items or {}) do
+    item.acquired_resolved_game_year = resolve_event_game_year(state, { id = item._event_id }, { game_time = item.game_time })
+  end
+end
+
+local function recompute_order_settlement_years(state)
+  for _, settlement in pairs(state.order_settlements or {}) do
+    settlement.resolved_game_year = resolve_event_game_year(state, { id = settlement._event_id }, { game_time = settlement.game_time })
+  end
+end
+
+local function recompute_all_resolved_years(state)
+  recompute_sale_years(state)
+  recompute_process_write_off_years(state)
+  recompute_external_item_years(state)
+  recompute_order_settlement_years(state)
+end
+
 local function item_base_cost(item)
   if item.base_operational_cost_gold ~= nil then
     return item.base_operational_cost_gold
@@ -177,6 +278,7 @@ function ledger.new(event_store)
     order_settlements = {}, -- settlement_id -> settlement data
     process_write_offs = {}, -- list of write-off entries
     process_game_time_overrides = {}, -- process_instance_id -> { scope -> { game_time, updated_at, note } }
+    ledger_game_year_defaults = {}, -- ordered rows: { effective_from_event_id, default_year, set_at, note }
     forge_sessions = {}, -- forge_session_id -> session data
     forge_session_items = {}, -- forge_session_id -> { item_id -> allocated_coal_gold }
     item_transformations = {}, -- new_item_id -> transformation link
@@ -272,6 +374,7 @@ function ledger.apply_event(state, event)
     local inventory = get_inventory()
     inventory.remove(state.inventory, payload.commodity, payload.qty)
     if payload.sale_id then
+      local resolved_game_year = resolve_event_game_year(state, event, payload)
       state.commodity_sales[payload.sale_id] = {
         sale_id = payload.sale_id,
         commodity = payload.commodity,
@@ -281,7 +384,10 @@ function ledger.apply_event(state, event)
         cost = payload.cost,
         revenue = payload.revenue,
         profit = payload.profit,
-        order_id = payload.order_id
+        order_id = payload.order_id,
+        game_time = payload.game_time,
+        resolved_game_year = resolved_game_year,
+        _event_id = event.id
       }
       if payload.order_id then
         state.order_commodity_sales[payload.order_id] = state.order_commodity_sales[payload.order_id] or {}
@@ -330,6 +436,10 @@ function ledger.apply_event(state, event)
     local deferred = get_deferred()
     return deferred.abort(state, payload.process_instance_id, payload.disposition, payload.note, payload.completed_at)
   elseif event_type == "PROCESS_WRITE_OFF" then
+    local resolved_game_year = resolve_event_game_year(state, event, payload, {
+      process_instance_id = payload.process_instance_id,
+      process_scope = "write_off"
+    })
     state.process_write_offs = state.process_write_offs or {}
     table.insert(state.process_write_offs, {
       process_instance_id = payload.process_instance_id,
@@ -337,7 +447,9 @@ function ledger.apply_event(state, event)
       amount_gold = payload.amount_gold or 0,
       reason = payload.reason,
       note = payload.note,
-      game_time = payload.game_time
+      game_time = payload.game_time,
+      resolved_game_year = resolved_game_year,
+      _event_id = event.id
     })
     return state
   elseif event_type == "PROCESS_SET_GAME_TIME" then
@@ -349,14 +461,20 @@ function ledger.apply_event(state, event)
       updated_at = event.ts,
       note = payload.note
     }
+    recompute_process_write_off_years(state)
     return state
   elseif event_type == "FORGE_WRITE_OFF" then
+    local resolved_game_year = resolve_event_game_year(state, event, payload)
     state.process_write_offs = state.process_write_offs or {}
     table.insert(state.process_write_offs, {
       process_instance_id = payload.forge_session_id,
+      at = event.ts,
       amount_gold = payload.amount_gold or 0,
       reason = payload.reason or "forge_expire_unused",
-      note = payload.note
+      note = payload.note,
+      game_time = payload.game_time,
+      resolved_game_year = resolved_game_year,
+      _event_id = event.id
     })
     return state
   elseif event_type == "SOURCE_CREATE" then
@@ -465,13 +583,43 @@ function ledger.apply_event(state, event)
     state.order_items[payload.order_id][payload.item_id] = true
     state.item_orders[payload.item_id] = payload.order_id
   elseif event_type == "ORDER_SETTLE" then
+    local resolved_game_year = resolve_event_game_year(state, event, payload)
     state.order_settlements[payload.settlement_id] = {
       settlement_id = payload.settlement_id,
       order_id = payload.order_id,
       amount_gold = payload.amount_gold,
       method = payload.method,
-      received_at = payload.received_at
+      received_at = payload.received_at,
+      game_time = payload.game_time,
+      resolved_game_year = resolved_game_year,
+      _event_id = event.id
     }
+  elseif event_type == "LEDGER_SET_DEFAULT_GAME_YEAR" then
+    local row = {
+      effective_from_event_id = tonumber(payload.effective_from_event_id),
+      default_year = tonumber(payload.default_year),
+      set_at = payload.set_at or event.ts,
+      note = payload.note
+    }
+    if not row.effective_from_event_id or not row.default_year then
+      error("LEDGER_SET_DEFAULT_GAME_YEAR requires effective_from_event_id and default_year")
+    end
+    state.ledger_game_year_defaults = state.ledger_game_year_defaults or {}
+    local replaced = false
+    for index, existing in ipairs(state.ledger_game_year_defaults) do
+      if tonumber(existing.effective_from_event_id) == row.effective_from_event_id then
+        state.ledger_game_year_defaults[index] = row
+        replaced = true
+        break
+      end
+    end
+    if not replaced then
+      table.insert(state.ledger_game_year_defaults, row)
+    end
+    table.sort(state.ledger_game_year_defaults, function(a, b)
+      return tonumber(a.effective_from_event_id) < tonumber(b.effective_from_event_id)
+    end)
+    recompute_all_resolved_years(state)
   elseif event_type == "ORDER_CLOSE" then
     local order = state.orders[payload.order_id]
     if not order then
@@ -480,6 +628,7 @@ function ledger.apply_event(state, event)
     order.status = payload.status or order.status
     order.closed_at = payload.closed_at
   elseif event_type == "ITEM_REGISTER_EXTERNAL" then
+    local acquired_resolved_game_year = resolve_event_game_year(state, event, payload)
     if state.crafted_items[payload.item_id] then
       error("Item " .. tostring(payload.item_id) .. " already exists as crafted item")
     end
@@ -494,7 +643,10 @@ function ledger.apply_event(state, event)
       basis_gold = payload.basis_gold,
       basis_source = payload.basis_source,
       status = payload.status or "active",
-      note = payload.note
+      note = payload.note,
+      game_time = payload.game_time,
+      acquired_resolved_game_year = acquired_resolved_game_year,
+      _event_id = event.id
     }
   elseif event_type == "ITEM_UPDATE_EXTERNAL" then
     local item = state.external_items[payload.item_id]
@@ -515,6 +667,11 @@ function ledger.apply_event(state, event)
     end
     if payload.note ~= nil then
       item.note = payload.note
+    end
+    if payload.game_time ~= nil then
+      item.game_time = payload.game_time
+      item._event_id = event.id
+      item.acquired_resolved_game_year = resolve_event_game_year(state, event, payload)
     end
   elseif event_type == "CRAFT_ITEM" then
     local source_id, source_kind = normalize_source_payload(payload)
@@ -583,7 +740,9 @@ function ledger.apply_event(state, event)
       sold_at = payload.sold_at,
       sale_price_gold = payload.sale_price_gold,
       game_time = payload.game_time,
-      settlement_id = payload.settlement_id
+      resolved_game_year = resolve_event_game_year(state, event, payload),
+      settlement_id = payload.settlement_id,
+      _event_id = event.id
     }
     state.sales[payload.sale_id] = sale
 
@@ -750,22 +909,24 @@ function ledger.apply_event(state, event)
 end
 
 -- Process OPENING_INVENTORY event
-function ledger.apply_opening_inventory(state, commodity, qty, unit_cost)
+function ledger.apply_opening_inventory(state, commodity, qty, unit_cost, game_time)
   local event = ledger.record_event(state, "OPENING_INVENTORY", {
     commodity = commodity,
     qty = qty,
-    unit_cost = unit_cost
+    unit_cost = unit_cost,
+    game_time = game_time
   })
   ledger.apply_event(state, event)
   return state
 end
 
 -- Process BROKER_BUY event
-function ledger.apply_broker_buy(state, commodity, qty, unit_cost)
+function ledger.apply_broker_buy(state, commodity, qty, unit_cost, game_time)
   local event = ledger.record_event(state, "BROKER_BUY", {
     commodity = commodity,
     qty = qty,
-    unit_cost = unit_cost
+    unit_cost = unit_cost,
+    game_time = game_time
   })
   ledger.apply_event(state, event)
   return state
@@ -791,7 +952,8 @@ function ledger.apply_broker_sell(state, commodity, qty, unit_price, opts)
     profit = profit,
     sale_id = opts.sale_id,
     sold_at = opts.sold_at or os.date("!%Y-%m-%dT%H:%M:%SZ"),
-    order_id = opts.order_id
+    order_id = opts.order_id,
+    game_time = opts.game_time
   })
 
   ledger.apply_event(state, event)
@@ -815,12 +977,13 @@ function ledger.apply_process(state, process_id, inputs, outputs, gold_fee, game
 end
 
 -- Process DESIGN_COST event
-function ledger.apply_design_cost(state, design_id, amount, kind)
+function ledger.apply_design_cost(state, design_id, amount, kind, game_time)
   local resolved_design_id = resolve_source_id(state, design_id)
   local event = ledger.record_event(state, "DESIGN_COST", {
     design_id = resolved_design_id,
     amount = amount,
-    kind = kind
+    kind = kind,
+    game_time = game_time
   })
 
   ledger.apply_event(state, event)
@@ -866,12 +1029,13 @@ function ledger.apply_design_start(state, design_id, design_type, name, provenan
 end
 
 -- Process DESIGN_SET_PER_ITEM_FEE event
-function ledger.apply_design_set_fee(state, design_id, amount)
+function ledger.apply_design_set_fee(state, design_id, amount, game_time)
   local resolved_design_id = resolve_source_id(state, design_id)
 
   local event = ledger.record_event(state, "DESIGN_SET_PER_ITEM_FEE", {
     design_id = resolved_design_id,
-    amount = amount
+    amount = amount,
+    game_time = game_time
   })
 
   ledger.apply_event(state, event)
@@ -970,11 +1134,12 @@ function ledger.apply_pattern_deactivate(state, pattern_pool_id)
   return state
 end
 
-function ledger.apply_sell_recovery(state, design_id, operational_profit)
+function ledger.apply_sell_recovery(state, design_id, operational_profit, game_time)
   local resolved_design_id = resolve_source_id(state, design_id)
   local event = ledger.record_event(state, "SELL_ITEM", {
     design_id = resolved_design_id,
-    operational_profit = operational_profit
+    operational_profit = operational_profit,
+    game_time = game_time
   })
 
   local result = ledger.apply_event(state, event)
@@ -1135,11 +1300,12 @@ function ledger.apply_craft_item_auto(state, item_id, design_id, opts)
     appearance_key,
     materials_payload,
     materials_source,
-    materials_cost
+    materials_cost,
+    opts.game_time
   )
 end
 
-function ledger.apply_craft_item(state, item_id, design_id, operational_cost_gold, cost_breakdown_json, appearance_key, materials, materials_source, materials_cost_gold)
+function ledger.apply_craft_item(state, item_id, design_id, operational_cost_gold, cost_breakdown_json, appearance_key, materials, materials_source, materials_cost_gold, game_time)
   local event = ledger.record_event(state, "CRAFT_ITEM", {
     item_id = item_id,
     source_id = design_id,
@@ -1151,6 +1317,7 @@ function ledger.apply_craft_item(state, item_id, design_id, operational_cost_gol
     cost_breakdown_json = cost_breakdown_json,
     appearance_key = appearance_key,
     crafted_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    game_time = game_time,
     materials = materials,
     materials_source = materials_source,
     materials_cost_gold = materials_cost_gold
@@ -1235,6 +1402,7 @@ function ledger.apply_source_craft_auto(state, item_id, source_id, source_kind, 
     cost_breakdown_json = encode_breakdown(breakdown),
     appearance_key = appearance_key,
     crafted_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    game_time = opts.game_time,
     materials = materials_payload,
     materials_source = materials_source,
     materials_cost_gold = materials_cost
@@ -1268,23 +1436,25 @@ function ledger.apply_forge_fire(state, forge_session_id, source_id, opts)
     expires_at = opts.expires_at,
     status = "in_flight",
     note = opts.note,
-    started_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+    started_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    game_time = opts.game_time
   })
   ledger.apply_event(state, event)
   return state
 end
 
-function ledger.apply_forge_attach(state, forge_session_id, item_id)
+function ledger.apply_forge_attach(state, forge_session_id, item_id, game_time)
   local event = ledger.record_event(state, "FORGE_ATTACH_ITEM", {
     forge_session_id = forge_session_id,
     item_id = item_id,
-    allocated_coal_gold = 0
+    allocated_coal_gold = 0,
+    game_time = game_time
   })
   ledger.apply_event(state, event)
   return state
 end
 
-function ledger.apply_forge_finalize(state, forge_session_id, status, method, note)
+function ledger.apply_forge_finalize(state, forge_session_id, status, method, note, game_time)
   local session = state.forge_sessions[forge_session_id]
   if not session then
     error("Forge session " .. tostring(forge_session_id) .. " not found")
@@ -1313,7 +1483,8 @@ function ledger.apply_forge_finalize(state, forge_session_id, status, method, no
         status = status,
         method = method,
         note = note,
-        closed_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+        closed_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+        game_time = game_time
       }
     }
   }
@@ -1327,7 +1498,8 @@ function ledger.apply_forge_finalize(state, forge_session_id, status, method, no
           forge_session_id = forge_session_id,
           amount_gold = coal_total,
           reason = "forge_expire_unused",
-          note = note
+          note = note,
+          game_time = game_time
         }
       })
     end
@@ -1390,7 +1562,8 @@ function ledger.apply_forge_finalize(state, forge_session_id, status, method, no
         allocations = allocations,
         session_total_gold = coal_total,
         computed_over = computed_over,
-        item_breakdowns = item_breakdowns
+        item_breakdowns = item_breakdowns,
+        game_time = game_time
       }
     })
   end
@@ -1403,12 +1576,12 @@ function ledger.apply_forge_finalize(state, forge_session_id, status, method, no
   return state
 end
 
-function ledger.apply_forge_close(state, forge_session_id, method, note)
-  return ledger.apply_forge_finalize(state, forge_session_id, "closed", method, note)
+function ledger.apply_forge_close(state, forge_session_id, method, note, game_time)
+  return ledger.apply_forge_finalize(state, forge_session_id, "closed", method, note, game_time)
 end
 
-function ledger.apply_forge_expire(state, forge_session_id, note)
-  return ledger.apply_forge_finalize(state, forge_session_id, "expired", "cost_weighted", note)
+function ledger.apply_forge_expire(state, forge_session_id, note, game_time)
+  return ledger.apply_forge_finalize(state, forge_session_id, "expired", "cost_weighted", note, game_time)
 end
 
 function ledger.apply_augment_item(state, new_item_id, source_id, target_item_id, opts)
@@ -1481,6 +1654,7 @@ function ledger.apply_augment_item(state, new_item_id, source_id, target_item_id
     operational_cost_gold = operational_cost,
     appearance_key = opts.appearance_key,
     note = opts.note,
+    game_time = opts.game_time,
     cost_breakdown_json = encode_breakdown(breakdown),
     crafted_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
   })
@@ -1489,14 +1663,15 @@ function ledger.apply_augment_item(state, new_item_id, source_id, target_item_id
   return state
 end
 
-function ledger.apply_craft_resolve(state, item_id, design_id, reason)
+function ledger.apply_craft_resolve(state, item_id, design_id, reason, game_time)
   local resolved_design_id = resolve_source_id(state, design_id)
   local event = ledger.record_event(state, "CRAFT_RESOLVE_SOURCE", {
     item_id = item_id,
     source_id = resolved_design_id,
     source_kind = "design",
     design_id = resolved_design_id,
-    reason = reason
+    reason = reason,
+    game_time = game_time
   })
 
   ledger.apply_event(state, event)
@@ -1504,7 +1679,7 @@ function ledger.apply_craft_resolve(state, item_id, design_id, reason)
   return state
 end
 
-function ledger.apply_item_add_external(state, item_id, name, basis_gold, basis_source, note, acquired_at)
+function ledger.apply_item_add_external(state, item_id, name, basis_gold, basis_source, note, acquired_at, game_time)
   local event = ledger.record_event(state, "ITEM_REGISTER_EXTERNAL", {
     item_id = item_id,
     name = name,
@@ -1512,7 +1687,8 @@ function ledger.apply_item_add_external(state, item_id, name, basis_gold, basis_
     basis_source = basis_source or "unknown",
     acquired_at = acquired_at or os.date("!%Y-%m-%dT%H:%M:%SZ"),
     status = "active",
-    note = note
+    note = note,
+    game_time = game_time
   })
 
   ledger.apply_event(state, event)
@@ -1528,6 +1704,7 @@ function ledger.apply_item_update_external(state, item_id, fields)
   payload.basis_source = fields.basis_source
   payload.status = fields.status
   payload.note = fields.note
+  payload.game_time = fields.game_time
   local event = ledger.record_event(state, "ITEM_UPDATE_EXTERNAL", payload)
   ledger.apply_event(state, event)
   return state
@@ -1545,7 +1722,7 @@ function ledger.apply_sell_item(state, sale_id, item_id, sale_price_gold, game_t
   return ledger.apply_event(state, event)
 end
 
-function ledger.apply_order_create(state, order_id, customer, note)
+function ledger.apply_order_create(state, order_id, customer, note, game_time)
   if state.orders[order_id] then
     error("Order " .. order_id .. " already exists")
   end
@@ -1555,7 +1732,8 @@ function ledger.apply_order_create(state, order_id, customer, note)
     customer = customer,
     note = note,
     status = "open",
-    created_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+    created_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    game_time = game_time
   })
 
   ledger.apply_event(state, event)
@@ -1563,7 +1741,7 @@ function ledger.apply_order_create(state, order_id, customer, note)
   return state
 end
 
-function ledger.apply_order_add_sale(state, order_id, sale_id)
+function ledger.apply_order_add_sale(state, order_id, sale_id, game_time)
   local order = state.orders[order_id]
   if not order then
     error("Order " .. order_id .. " not found")
@@ -1580,7 +1758,8 @@ function ledger.apply_order_add_sale(state, order_id, sale_id)
 
   local event = ledger.record_event(state, "ORDER_ADD_SALE", {
     order_id = order_id,
-    sale_id = sale_id
+    sale_id = sale_id,
+    game_time = game_time
   })
 
   ledger.apply_event(state, event)
@@ -1588,7 +1767,7 @@ function ledger.apply_order_add_sale(state, order_id, sale_id)
   return state
 end
 
-function ledger.apply_order_add_item(state, order_id, item_id)
+function ledger.apply_order_add_item(state, order_id, item_id, game_time)
   local order = state.orders[order_id]
   if not order then
     error("Order " .. order_id .. " not found")
@@ -1605,7 +1784,8 @@ function ledger.apply_order_add_item(state, order_id, item_id)
 
   local event = ledger.record_event(state, "ORDER_ADD_ITEM", {
     order_id = order_id,
-    item_id = item_id
+    item_id = item_id,
+    game_time = game_time
   })
 
   ledger.apply_event(state, event)
@@ -1691,7 +1871,8 @@ function ledger.apply_order_settle(state, settlement_id, order_id, amount_gold, 
       order_id = order_id,
       amount_gold = amount_gold,
       method = method,
-      received_at = ts
+      received_at = ts,
+      game_time = game_time
     },
     ts = ts
   })
@@ -1719,7 +1900,8 @@ function ledger.apply_order_settle(state, settlement_id, order_id, amount_gold, 
       event_type = "ORDER_ADD_SALE",
       payload = {
         order_id = order_id,
-        sale_id = sale_id
+        sale_id = sale_id,
+        game_time = game_time
       },
       ts = ts
     })
@@ -1733,7 +1915,7 @@ function ledger.apply_order_settle(state, settlement_id, order_id, amount_gold, 
   return state
 end
 
-function ledger.apply_order_close(state, order_id)
+function ledger.apply_order_close(state, order_id, game_time)
   local order = state.orders[order_id]
   if not order then
     error("Order " .. order_id .. " not found")
@@ -1742,7 +1924,8 @@ function ledger.apply_order_close(state, order_id)
   local event = ledger.record_event(state, "ORDER_CLOSE", {
     order_id = order_id,
     status = "closed",
-    closed_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+    closed_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    game_time = game_time
   })
 
   ledger.apply_event(state, event)
@@ -2142,6 +2325,26 @@ function ledger.apply_process_set_game_time(state, process_instance_id, game_tim
     process_instance_id = process_instance_id,
     scope = scope,
     game_time = game_time,
+    note = note
+  })
+
+  return ledger.apply_event(state, event)
+end
+
+function ledger.apply_set_default_game_year(state, default_year, effective_from_event_id, note)
+  local year = tonumber(default_year)
+  local from_id = tonumber(effective_from_event_id)
+  if not year then
+    error("default_year must be a number")
+  end
+  if not from_id or from_id <= 0 then
+    error("effective_from_event_id must be a positive integer")
+  end
+
+  local event = ledger.record_event(state, "LEDGER_SET_DEFAULT_GAME_YEAR", {
+    effective_from_event_id = from_id,
+    default_year = year,
+    set_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
     note = note
   })
 

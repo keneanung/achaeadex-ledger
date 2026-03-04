@@ -81,34 +81,6 @@ local function sum_process_losses(state)
   return total
 end
 
-local function resolve_process_override_game_time(state, process_instance_id, scope)
-  local overrides = state.process_game_time_overrides and state.process_game_time_overrides[process_instance_id] or nil
-  if not overrides then
-    return nil
-  end
-  local scoped = overrides[scope]
-  if scoped and scoped.game_time and scoped.game_time.year then
-    return scoped.game_time
-  end
-  local fallback = overrides.all
-  if fallback and fallback.game_time and fallback.game_time.year then
-    return fallback.game_time
-  end
-  return nil
-end
-
-local function resolve_process_write_off_year(state, process_instance_id, payload)
-  local payload_time = payload and payload.game_time or nil
-  if payload_time and payload_time.year then
-    return tonumber(payload_time.year)
-  end
-  local override_time = resolve_process_override_game_time(state, process_instance_id, "write_off")
-  if override_time and override_time.year then
-    return tonumber(override_time.year)
-  end
-  return nil
-end
-
 local function process_write_off_summary(state, year)
   local summary = {
     total = 0,
@@ -119,32 +91,24 @@ local function process_write_off_summary(state, year)
     unattributed_entries = {}
   }
 
-  for _, event in ipairs(get_events(state)) do
-    local payload = event.payload or {}
-    if event.event_type == "PROCESS_WRITE_OFF" then
-      local amount = round_gold(payload.amount_gold)
-      local process_instance_id = payload.process_instance_id
-      local resolved_year = resolve_process_write_off_year(state, process_instance_id, payload)
+  for _, row in ipairs(state.process_write_offs or {}) do
+    local amount = round_gold(row.amount_gold)
+    local resolved_year = row.resolved_game_year and tonumber(row.resolved_game_year) or nil
 
-      summary.total = summary.total + amount
-      if resolved_year then
-        summary.attributed_total = summary.attributed_total + amount
-        if year and tonumber(resolved_year) == tonumber(year) then
-          summary.year_total = summary.year_total + amount
-        end
-      else
-        summary.unattributed_total = summary.unattributed_total + amount
-        summary.unattributed_count = summary.unattributed_count + 1
-        table.insert(summary.unattributed_entries, {
-          process_instance_id = process_instance_id,
-          amount_gold = amount,
-          at = event.ts
-        })
+    summary.total = summary.total + amount
+    if resolved_year then
+      summary.attributed_total = summary.attributed_total + amount
+      if year and tonumber(resolved_year) == tonumber(year) then
+        summary.year_total = summary.year_total + amount
       end
-    elseif event.event_type == "FORGE_WRITE_OFF" then
-      local amount = round_gold(payload.amount_gold)
-      summary.total = summary.total + amount
+    else
       summary.unattributed_total = summary.unattributed_total + amount
+      summary.unattributed_count = summary.unattributed_count + 1
+      table.insert(summary.unattributed_entries, {
+        process_instance_id = row.process_instance_id,
+        amount_gold = amount,
+        at = row.at
+      })
     end
   end
 
@@ -303,7 +267,8 @@ local function sale_breakdown(state, sale)
     applied_to_design_capital = round_gold(sale.applied_to_design_capital or 0),
     applied_to_pattern_capital = round_gold(sale.applied_to_pattern_capital or 0),
     true_profit = true_profit,
-    game_time = sale.game_time
+    game_time = sale.game_time,
+    resolved_game_year = sale.resolved_game_year
   }
 end
 
@@ -312,6 +277,36 @@ local function collect_sales(state, predicate)
   for _, sale in pairs(state.sales) do
     if not predicate or predicate(sale) then
       table.insert(sales, sale_breakdown(state, sale))
+    end
+  end
+  return sales
+end
+
+local function collect_commodity_sales(state, predicate)
+  local sales = {}
+  for _, sale in pairs(state.commodity_sales or {}) do
+    if not predicate or predicate(sale) then
+      table.insert(sales, {
+        sale_id = sale.sale_id,
+        item_id = nil,
+        design_id = nil,
+        appearance_key = string.format("%s x%s", tostring(sale.commodity), tostring(sale.qty)),
+        item_kind = "commodity",
+        commodity = sale.commodity,
+        qty = sale.qty,
+        unit_price = sale.unit_price,
+        provenance = nil,
+        recovery_enabled = 0,
+        sold_at = sale.sold_at,
+        sale_price_gold = sale.revenue or 0,
+        operational_cost_gold = sale.cost or 0,
+        operational_profit = sale.profit or ((sale.revenue or 0) - (sale.cost or 0)),
+        applied_to_design_capital = 0,
+        applied_to_pattern_capital = 0,
+        true_profit = sale.profit or ((sale.revenue or 0) - (sale.cost or 0)),
+        game_time = sale.game_time,
+        resolved_game_year = sale.resolved_game_year
+      })
     end
   end
   return sales
@@ -351,7 +346,8 @@ local function collect_commodity_sales_by_ids(state, sale_ids)
         applied_to_design_capital = 0,
         applied_to_pattern_capital = 0,
         true_profit = sale.profit or ((sale.revenue or 0) - (sale.cost or 0)),
-        game_time = nil
+        game_time = sale.game_time,
+        resolved_game_year = sale.resolved_game_year
       })
     end
   end
@@ -403,7 +399,18 @@ end
 function reports.overall(state, opts)
   opts = opts or {}
   local sales = collect_sales(state)
+  local commodity_sales = collect_commodity_sales(state)
+  for _, sale in ipairs(commodity_sales) do
+    table.insert(sales, sale)
+  end
   local totals = sum_totals(sales)
+  local year_settlement_count = 0
+  for _, settlement in pairs(state.order_settlements or {}) do
+    local resolved_year = settlement.resolved_game_year and tonumber(settlement.resolved_game_year) or nil
+    if resolved_year and resolved_year == tonumber(year) then
+      year_settlement_count = year_settlement_count + 1
+    end
+  end
   local process_loss_summary = process_write_off_summary(state)
   local process_losses = round_gold(process_loss_summary.total)
 
@@ -465,13 +472,25 @@ function reports.year(state, year, opts)
   opts = opts or {}
   local unknown_time = false
   local sales = collect_sales(state, function(sale)
-    local game_time = sale.game_time
-    if not game_time or not game_time.year then
+    local resolved_year = sale.resolved_game_year and tonumber(sale.resolved_game_year) or nil
+    if not resolved_year then
       unknown_time = true
       return false
     end
-    return tonumber(game_time.year) == tonumber(year)
+    return resolved_year == tonumber(year)
   end)
+
+  local broker_sales = collect_commodity_sales(state, function(sale)
+    local resolved_year = sale.resolved_game_year and tonumber(sale.resolved_game_year) or nil
+    if not resolved_year then
+      unknown_time = true
+      return false
+    end
+    return resolved_year == tonumber(year)
+  end)
+  for _, sale in ipairs(broker_sales) do
+    table.insert(sales, sale)
+  end
 
   local totals = sum_totals(sales)
   local process_loss_summary = process_write_off_summary(state, year)
@@ -516,7 +535,7 @@ function reports.year(state, year, opts)
   totals.true_profit = round_gold(totals.true_profit) - year_process_losses
 
   local note = nil
-  if process_loss_summary.unattributed_count > 0 then
+  if opts.verbose and process_loss_summary.unattributed_count > 0 then
     note = string.format(
       "Note: %d process write-offs are not attributed to a game year. Use 'adex process list --needs-year' and 'adex process set-year ...' to fix.",
       process_loss_summary.unattributed_count
@@ -529,6 +548,8 @@ function reports.year(state, year, opts)
     sales = sales,
     note = note,
     unattributed_process_write_off_count = process_loss_summary.unattributed_count,
+    broker_activity_count = #broker_sales,
+    order_settlement_count = year_settlement_count,
     holdings = {
       inventory_value = inventory_total,
       wip_value = wip_total,
@@ -612,12 +633,12 @@ function reports.design(state, design_id, opts)
     if not year_filter then
       return true
     end
-    local game_time = sale.game_time
-    if not game_time or not game_time.year then
+    local resolved_year = sale.resolved_game_year and tonumber(sale.resolved_game_year) or nil
+    if not resolved_year then
       unknown_time = true
       return false
     end
-    return tonumber(game_time.year) == tonumber(year_filter)
+    return resolved_year == tonumber(year_filter)
   end)
 
   local crafted_count = 0

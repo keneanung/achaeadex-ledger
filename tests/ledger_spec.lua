@@ -356,4 +356,36 @@ describe("Ledger Core", function()
       assert.are.equal("active", state.pattern_pools["P1"].status)
     end)
   end)
+
+  describe("game_time capture", function()
+    it("recovery-only SELL_ITEM carries game_time in payload", function()
+      local store = memory_store.new()
+      local state = ledger.new(store)
+
+      ledger.apply_pattern_activate(state, "P1", "shirt", "Test Shirts", 150)
+      ledger.apply_design_start(state, "D1", "shirt", "Test Shirt", "private", 1)
+      ledger.apply_sell_recovery(state, "D1", 100, { year = 777 })
+
+      local events = store:read_all()
+      local last = events[#events]
+      assert.are.equal("SELL_ITEM", last.event_type)
+      assert.are.equal(777, last.payload.game_time.year)
+    end)
+
+    it("non-structural economic events accept optional game_time payload", function()
+      local store = memory_store.new()
+      local state = ledger.new(store)
+
+      ledger.apply_opening_inventory(state, "leather", 10, 20, { year = 998 })
+      ledger.apply_broker_buy(state, "leather", 5, 25, { year = 998 })
+      ledger.apply_broker_sell(state, "leather", 2, 40, { sale_id = "CS-T1", game_time = { year = 998 } })
+      ledger.apply_item_add_external(state, "E-T1", "ring", 100, "purchase", nil, nil, { year = 998 })
+
+      local events = store:read_all()
+      assert.are.equal(998, events[1].payload.game_time.year)
+      assert.are.equal(998, events[2].payload.game_time.year)
+      assert.are.equal(998, events[3].payload.game_time.year)
+      assert.are.equal(998, events[4].payload.game_time.year)
+    end)
+  end)
 end)

@@ -177,4 +177,149 @@ describe("Order price suggestions", function()
     assert.are.equal(override_item.suggested.mid + default_item.suggested.mid, order_suggestion.lump_sum_mid)
     assert.are.equal(override_item.suggested.high + default_item.suggested.high, order_suggestion.lump_sum_high)
   end)
+
+  it("resolves per-item source via alias mapping when needed", function()
+    local store = memory_store.new()
+    local state = ledger.new(store)
+
+    ledger.apply_design_start(state, "D1", "shirt", "Design 1", "public", 0)
+    ledger.apply_design_alias(state, "D1", "1234", "final", 1)
+    ledger.apply_craft_item(state, "I1", "D1", 1000, "{}", nil)
+    ledger.apply_order_create(state, "O1", "Ada", "")
+    ledger.apply_order_add_item(state, "O1", "I1")
+
+    state.crafted_items["I1"].source_id = "1234"
+
+    local order_suggestion = pricing.suggest_order(state, "O1", {})
+    assert.are.equal(1, order_suggestion.included_count)
+    assert.are.equal("D1", order_suggestion.item_rows[1].source_id)
+  end)
+end)
+
+describe("Source price quote", function()
+  local pricing
+  local ledger
+  local memory_store
+
+  before_each(function()
+    _G.AchaeadexLedger = nil
+    dofile("src/scripts/core/pricing.lua")
+    dofile("src/scripts/core/json.lua")
+    dofile("src/scripts/core/inventory.lua")
+    dofile("src/scripts/core/deferred_processes.lua")
+    dofile("src/scripts/core/pattern_pools.lua")
+    dofile("src/scripts/core/production_sources.lua")
+    dofile("src/scripts/core/recovery.lua")
+    dofile("src/scripts/core/ledger.lua")
+    dofile("src/scripts/core/storage/memory_event_store.lua")
+
+    pricing = _G.AchaeadexLedger.Core.Pricing
+    ledger = _G.AchaeadexLedger.Core.Ledger
+    memory_store = _G.AchaeadexLedger.Core.MemoryEventStore
+  end)
+
+  it("quotes by primary source id", function()
+    local store = memory_store.new()
+    local state = ledger.new(store)
+
+    ledger.apply_opening_inventory(state, "leather", 10, 20)
+    ledger.apply_design_start(state, "D1", "shirt", "Design 1", "public", 0)
+    ledger.apply_design_set_bom(state, "D1", { leather = 2 })
+    ledger.apply_design_set_fee(state, "D1", 15)
+
+    local quote = pricing.quote_source(state, "D1", {})
+    assert.are.equal("D1", quote.resolved_source_id)
+    assert.is_nil(quote.matched_alias_id)
+    assert.are.equal(55, quote.base_cost)
+    assert.are.equal(300, quote.per_unit.low)
+    assert.are.equal(500, quote.per_unit.mid)
+    assert.are.equal(700, quote.per_unit.high)
+  end)
+
+  it("quotes by alias id and resolves to same internal source", function()
+    local store = memory_store.new()
+    local state = ledger.new(store)
+
+    ledger.apply_opening_inventory(state, "leather", 10, 20)
+    ledger.apply_design_start(state, "D1", "shirt", "Design 1", "public", 0)
+    ledger.apply_design_set_bom(state, "D1", { leather = 2 })
+    ledger.apply_design_set_fee(state, "D1", 15)
+    ledger.apply_design_alias(state, "D1", "1234", "final", 1)
+
+    local primary = pricing.quote_source(state, "D1", {})
+    local alias = pricing.quote_source(state, "1234", {})
+
+    assert.are.equal("D1", alias.resolved_source_id)
+    assert.are.equal("1234", alias.matched_alias_id)
+    assert.are.equal(primary.base_cost, alias.base_cost)
+    assert.are.equal(primary.per_unit.low, alias.per_unit.low)
+    assert.are.equal(primary.per_unit.mid, alias.per_unit.mid)
+    assert.are.equal(primary.per_unit.high, alias.per_unit.high)
+  end)
+
+  it("materials override BOM for quote", function()
+    local store = memory_store.new()
+    local state = ledger.new(store)
+
+    ledger.apply_opening_inventory(state, "leather", 10, 20)
+    ledger.apply_opening_inventory(state, "cloth", 10, 5)
+    ledger.apply_design_start(state, "D1", "shirt", "Design 1", "public", 0)
+    ledger.apply_design_set_bom(state, "D1", { leather = 2 })
+
+    local quote = pricing.quote_source(state, "D1", {
+      materials = { cloth = 3 }
+    })
+
+    assert.are.equal("explicit", quote.materials_source)
+    assert.are.equal(15, quote.components.materials_cost)
+  end)
+
+  it("missing WAC yields warning without failing", function()
+    local store = memory_store.new()
+    local state = ledger.new(store)
+
+    ledger.apply_design_start(state, "D1", "shirt", "Design 1", "public", 0)
+    ledger.apply_design_set_bom(state, "D1", { silk = 2 })
+
+    local quote = pricing.quote_source(state, "D1", {})
+    assert.are.equal(1, quote.missing_wac_count)
+    assert.are.equal(1, #quote.warnings)
+    assert.are.equal(0, quote.components.materials_cost)
+  end)
+
+  it("rounding override follows same pricing math as suggest", function()
+    local store = memory_store.new()
+    local state = ledger.new(store)
+
+    ledger.apply_opening_inventory(state, "leather", 10, 20)
+    ledger.apply_design_start(state, "D1", "shirt", "Design 1", "public", 0)
+    ledger.apply_design_set_bom(state, "D1", { leather = 2 })
+    ledger.apply_design_set_fee(state, "D1", 15)
+
+    local quote = pricing.quote_source(state, "D1", {
+      round = 100
+    })
+    local expected = pricing.suggest_prices(55, {
+      round_to_gold = 100,
+      tiers = pricing.default_policy().tiers
+    })
+
+    assert.are.equal(expected.rounded_base_gold, quote.rounded_base)
+    assert.are.equal(expected.suggested.low, quote.per_unit.low)
+    assert.are.equal(expected.suggested.mid, quote.per_unit.mid)
+    assert.are.equal(expected.suggested.high, quote.per_unit.high)
+  end)
+
+  it("suggest_item resolves item source via alias mapping", function()
+    local store = memory_store.new()
+    local state = ledger.new(store)
+
+    ledger.apply_design_start(state, "D1", "shirt", "Design 1", "public", 0)
+    ledger.apply_design_alias(state, "D1", "1234", "final", 1)
+    ledger.apply_craft_item(state, "I1", "D1", 1000, "{}", nil)
+    state.crafted_items["I1"].source_id = "1234"
+
+    local suggestion = pricing.suggest_item(state, "I1")
+    assert.are.equal("D1", suggestion.resolved_source_id)
+  end)
 end)
