@@ -368,6 +368,10 @@ schema.migrations = {
     CREATE INDEX IF NOT EXISTS idx_forge_write_offs_resolved_game_year ON forge_write_offs(resolved_game_year);
     CREATE INDEX IF NOT EXISTS idx_forge_write_offs_source_event_id ON forge_write_offs(source_event_id);
     CREATE INDEX IF NOT EXISTS idx_ledger_game_year_defaults_default_year ON ledger_game_year_defaults(default_year);
+  ]],
+  [13] = [[
+    ALTER TABLE production_sources ADD COLUMN metadata_json TEXT;
+    CREATE INDEX IF NOT EXISTS idx_production_sources_metadata_json ON production_sources(metadata_json);
   ]]
 }
 

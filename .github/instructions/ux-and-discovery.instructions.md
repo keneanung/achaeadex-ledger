@@ -118,3 +118,11 @@ BACKWARD COMPATIBILITY
 
 - User-facing "design" commands accept design_id, which equals the design source_id.
 - Legacy references to design_id in outputs should be treated as design source_id.
+
+------------------------------------------------------------
+PASSIVE DESIGN DISCOVERY
+------------------------------------------------------------
+
+- Designs are auto-imported when the user views `nds p <id>` output in-game.
+- No explicit import command is required for this workflow.
+- Auto-import must be idempotent and safe to repeat.

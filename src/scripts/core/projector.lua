@@ -230,9 +230,10 @@ function projector.apply(conn, event)
     local json = get_json()
     local bom_json = payload.bom and json.encode(payload.bom) or nil
     local pricing_json = payload.pricing_policy and json.encode(payload.pricing_policy) or nil
+    local metadata_json = payload.metadata and json.encode(payload.metadata) or nil
     exec_sql(conn, string.format(
-      "INSERT OR REPLACE INTO production_sources (source_id, source_kind, source_type, name, created_at, pattern_pool_id, per_item_fee_gold, bom_json, pricing_policy_json, provenance, recovery_enabled, status, capital_remaining_gold) " ..
-      "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+      "INSERT OR REPLACE INTO production_sources (source_id, source_kind, source_type, name, created_at, pattern_pool_id, per_item_fee_gold, bom_json, pricing_policy_json, metadata_json, provenance, recovery_enabled, status, capital_remaining_gold) " ..
+      "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
       sql_value(payload.source_id),
       sql_value(payload.source_kind),
       sql_value(payload.source_type),
@@ -242,6 +243,7 @@ function projector.apply(conn, event)
       sql_value(payload.per_item_fee_gold or 0),
       sql_value(bom_json),
       sql_value(pricing_json),
+      sql_value(metadata_json),
       sql_value(payload.provenance or "system"),
       sql_value(payload.recovery_enabled or 0),
       sql_value(payload.status or "active"),
@@ -394,13 +396,16 @@ function projector.apply(conn, event)
 
   if event_type == "DESIGN_UPDATE" then
     local source_id, _, source_type = normalize_source_payload(payload)
+    local json = get_json()
+    local metadata_json = payload.metadata and json.encode(payload.metadata) or nil
     exec_sql(conn, string.format(
-      "UPDATE production_sources SET source_type = COALESCE(%s, source_type), name = COALESCE(%s, name), provenance = COALESCE(%s, provenance), recovery_enabled = COALESCE(%s, recovery_enabled), status = COALESCE(%s, status), pattern_pool_id = %s WHERE source_id = %s",
+      "UPDATE production_sources SET source_type = COALESCE(%s, source_type), name = COALESCE(%s, name), provenance = COALESCE(%s, provenance), recovery_enabled = COALESCE(%s, recovery_enabled), status = COALESCE(%s, status), metadata_json = COALESCE(%s, metadata_json), pattern_pool_id = %s WHERE source_id = %s",
       sql_value(source_type),
       sql_value(payload.name),
       sql_value(payload.provenance),
       sql_value(payload.recovery_enabled),
       sql_value(payload.status),
+      sql_value(metadata_json),
       sql_value(payload.pattern_pool_id),
       sql_value(resolve_source_id(conn, source_id))
     ))

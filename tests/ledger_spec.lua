@@ -211,6 +211,17 @@ describe("Ledger Core", function()
   end)
   
   describe("DESIGN_START", function()
+    it("allows private recovery-enabled design without active pattern pool", function()
+      local store = memory_store.new()
+      local state = ledger.new(store)
+
+      ledger.apply_design_start(state, "DNP1", "armband", "No Pattern Armband", "private", nil)
+
+      assert.is_not_nil(state.production_sources["DNP1"])
+      assert.are.equal(1, state.production_sources["DNP1"].recovery_enabled)
+      assert.is_nil(state.production_sources["DNP1"].pattern_pool_id)
+    end)
+
     it("should create private design with default recovery enabled", function()
       local store = memory_store.new()
       local state = ledger.new(store)

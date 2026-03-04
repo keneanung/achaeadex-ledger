@@ -613,3 +613,19 @@ Build script must:
 2) Run busted
 3) Build with muddler
 4) Output .mpackage into /build
+
+------------------------------------------------------------
+PASSIVE DESIGN DETAIL PARSING (NDS)
+------------------------------------------------------------
+
+- Mudlet layer MUST passively observe incoming lines for `nds p <id>` output.
+- Capture start pattern:
+  - `^Design(\d+)\s+Designer:`
+- Capture end detection:
+  1) Primary: `isPrompt()`
+  2) Fallback: new block start while already capturing (finalize previous, start next)
+  3) Safety cutoff: max buffered lines/time, then abort with warning
+- ANSI color codes must be stripped before parsing.
+- Parsing and upsert logic should be implemented in testable core modules.
+- Capture/wiring should remain in Mudlet integration modules.
+- Parsed data must be persisted through normal immutable ledger events only (no direct projection writes).

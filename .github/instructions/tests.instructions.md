@@ -492,6 +492,106 @@ And:
 - with --verbose, explicit warnings may be shown
 
 ------------------------------------------------------------
+TEST 38 – PASSIVE NDS PARSE: TAILORING PUBLIC CLOTH
+------------------------------------------------------------
+
+Given:
+- passive parse input from `nds p <id>` for a tailoring design owned by Public with cloth BOM
+Expected:
+- alias_id is parsed
+- provenance resolves to public
+- recovery_enabled is 0
+- BOM includes cloth quantities
+- short_desc is captured
+
+------------------------------------------------------------
+TEST 39 – PASSIVE NDS PARSE: TAILORING ORGANIZATION CLOTH
+------------------------------------------------------------
+
+Given:
+- passive parse input from `nds p <id>` for a tailoring design owned by an organization with cloth BOM
+Expected:
+- alias_id is parsed
+- provenance resolves to organization
+- recovery_enabled is 0
+- BOM includes cloth quantities
+- short_desc is captured
+
+------------------------------------------------------------
+TEST 40 – PASSIVE NDS PARSE: TAILORING PRIVATE LEATHER
+------------------------------------------------------------
+
+Given:
+- passive parse input from `nds p <id>` for a tailoring design owned by `Keneanung` with leather BOM
+Expected:
+- alias_id is parsed
+- provenance resolves to private
+- recovery_enabled may be enabled (owner-only rule)
+- BOM includes leather quantities
+- short_desc is captured
+
+------------------------------------------------------------
+TEST 41 – PASSIVE NDS PARSE: JEWELLERY WITH CRAFTING FEE AND GEMS
+------------------------------------------------------------
+
+Given:
+- passive parse input from `nds p <id>` for jewellery with fee, commodity BOM, and gem requirements
+Expected:
+- alias_id is parsed
+- per-item/crafting fee is parsed
+- gem requirements are parsed and represented in BOM
+- short_desc is captured
+
+------------------------------------------------------------
+TEST 42 – PASSIVE NDS PARSE: JEWELLERY WITH NO GEMS
+------------------------------------------------------------
+
+Given:
+- passive parse input from `nds p <id>` for jewellery with fee and no gems
+Expected:
+- alias_id is parsed
+- per-item/crafting fee is parsed
+- gem BOM entries are absent
+- short_desc is captured
+
+------------------------------------------------------------
+TEST 43 – PASSIVE NDS PARSE: FURNITURE WITH SAMPLES AND CRAFTING FEE
+------------------------------------------------------------
+
+Given:
+- passive parse input from `nds p <id>` for furniture with sample metadata and crafting fee
+Expected:
+- alias_id is parsed
+- per-item/crafting fee is parsed
+- sample metadata is captured
+- sample metadata is not treated as commodity BOM
+- short_desc is captured
+
+------------------------------------------------------------
+TEST 44 – PASSIVE NDS PARSE: FOREIGN OWNER PROVENANCE RULE
+------------------------------------------------------------
+
+Given:
+- passive parse input where owner is neither `Keneanung`, Public, nor an organization marker
+Expected:
+- provenance resolves to foreign/unknown-non-owned policy outcome
+- recovery_enabled is 0
+
+------------------------------------------------------------
+TEST 45 – PASSIVE NDS PARSE: REQUIRED SHORT_DESC AND IDEMPOTENT UPSERT
+------------------------------------------------------------
+
+Given:
+- parsed block missing short_desc
+Expected:
+- parse/upsert fails for required short_desc
+
+And given:
+- same valid parsed block ingested multiple times
+Expected:
+- upsert is idempotent (no duplicate logical records/events)
+
+------------------------------------------------------------
 PROCESS YEAR ATTRIBUTION ADDENDUM
 ------------------------------------------------------------
 
@@ -501,6 +601,18 @@ These are mandatory and folded into this file:
 3) Missing game_time + no override remains unattributed and excluded from year totals.
 4) Rebuild remains deterministic with PROCESS_SET_GAME_TIME correction events.
 5) Year report warnings are quiet by default; explicit warnings shown only with --verbose.
+
+------------------------------------------------------------
+PASSIVE NDS PARSING ADDENDUM
+------------------------------------------------------------
+
+These are mandatory and folded into this file:
+1) Passive parsing must cover tailoring public cloth, tailoring organization cloth, tailoring private leather, jewellery (with gems), jewellery (without gems), and furniture (with samples).
+2) Each parser case must validate alias_id extraction, provenance detection, owner-based recovery enforcement, BOM extraction, and short_desc capture.
+3) Gem parsing must contribute to BOM where present.
+4) Sample metadata must be captured but must not be treated as commodity BOM.
+5) Missing short_desc must fail parse/upsert for that block.
+6) Re-parsing the same block must remain idempotent in upsert behavior.
 
 ------------------------------------------------------------
 TEST EXECUTION

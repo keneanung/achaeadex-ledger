@@ -1,0 +1,12 @@
+[
+  {
+    "name": "design_capture_line",
+    "isActive": "yes",
+    "patterns": [
+      {
+        "pattern": "^.*$",
+        "type": "regex"
+      }
+    ]
+  }
+]

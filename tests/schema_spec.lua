@@ -495,6 +495,23 @@ describe("Schema Migration", function()
       db:close()
     end)
   end)
+
+  describe("migration v13", function()
+    it("should add production_sources.metadata_json", function()
+      local db = lsqlite3.open_memory()
+      schema.migrate(db, 13)
+
+      local columns = {}
+      local stmt = db:prepare("PRAGMA table_info(production_sources)")
+      for row in stmt:nrows() do
+        columns[row.name] = true
+      end
+      stmt:finalize()
+
+      assert.is_true(columns.metadata_json)
+      db:close()
+    end)
+  end)
   
   describe("migrate function", function()
     it("should migrate from version 0 to 1", function()
@@ -536,8 +553,8 @@ describe("Schema Migration", function()
       
       local version = schema.migrate(db)
       
-      -- Should migrate to the latest version (currently 12)
-      assert.are.equal(12, version)
+      -- Should migrate to the latest version (currently 13)
+      assert.are.equal(13, version)
       
       db:close()
     end)

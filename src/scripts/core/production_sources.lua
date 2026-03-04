@@ -33,9 +33,6 @@ local function resolve_pattern_pool_id(state, source_kind, source_type, recovery
 
   local pattern_pools = get_pattern_pools()
   local pool_id = pattern_pools.get_active_pool_id(state, source_type)
-  if not pool_id then
-    error("No active pattern pool for type: " .. source_type)
-  end
   return pool_id
 end
 
@@ -75,7 +72,8 @@ function sources.create_source(state, source_id, source_kind, source_type, name,
     status = status,
     capital_remaining = opts and opts.capital_remaining or 0,
     bom = opts and opts.bom or nil,
-    pricing_policy = opts and opts.pricing_policy or nil
+    pricing_policy = opts and opts.pricing_policy or nil,
+    metadata = opts and opts.metadata or nil
   }
 
   state.production_sources[source_id] = source
@@ -156,6 +154,9 @@ function sources.update(state, source_id, fields)
   end
   if fields.per_item_fee_gold ~= nil then
     source.per_item_fee_gold = fields.per_item_fee_gold
+  end
+  if fields.metadata ~= nil then
+    source.metadata = fields.metadata
   end
 
   source.pattern_pool_id = resolve_pattern_pool_id(state, source.source_kind, source.source_type, source.recovery_enabled)

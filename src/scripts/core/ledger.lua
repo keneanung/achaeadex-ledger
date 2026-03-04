@@ -493,7 +493,8 @@ function ledger.apply_event(state, event)
         per_item_fee_gold = payload.per_item_fee_gold,
         bom = payload.bom,
         pricing_policy = payload.pricing_policy,
-        capital_remaining = payload.capital_remaining_gold
+        capital_remaining = payload.capital_remaining_gold,
+        metadata = payload.metadata
       })
     end
   elseif event_type == "DESIGN_START" then
@@ -538,7 +539,8 @@ function ledger.apply_event(state, event)
       source_type = payload.source_type or payload.design_type,
       provenance = payload.provenance,
       recovery_enabled = payload.recovery_enabled,
-      status = payload.status
+      status = payload.status,
+      metadata = payload.metadata
     })
     if payload.pattern_pool_id ~= nil then
       state.production_sources[source_id].pattern_pool_id = payload.pattern_pool_id
@@ -1006,9 +1008,6 @@ function ledger.apply_design_start(state, design_id, design_type, name, provenan
   if recovery_enabled == 1 then
     local pattern_pools = get_pattern_pools()
     pattern_pool_id = pattern_pools.get_active_pool_id(state, design_type)
-    if not pattern_pool_id then
-      error("No active pattern pool for type: " .. design_type)
-    end
   end
 
   local created_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
@@ -1084,9 +1083,6 @@ function ledger.apply_design_update(state, design_id, fields)
   if target_recovery == 1 then
     local pattern_pools = get_pattern_pools()
     pattern_pool_id = pattern_pools.get_active_pool_id(state, target_type)
-    if not pattern_pool_id then
-      error("No active pattern pool for type: " .. target_type)
-    end
   end
 
   local event = ledger.record_event(state, "DESIGN_UPDATE", {
@@ -1096,6 +1092,7 @@ function ledger.apply_design_update(state, design_id, fields)
     provenance = fields.provenance,
     recovery_enabled = fields.recovery_enabled,
     status = fields.status,
+    metadata = fields.metadata,
     pattern_pool_id = pattern_pool_id
   })
 
@@ -1339,6 +1336,7 @@ function ledger.apply_source_create(state, source_id, source_kind, source_type, 
     recovery_enabled = opts.recovery_enabled,
     status = opts.status,
     per_item_fee_gold = opts.per_item_fee_gold,
+    metadata = opts.metadata,
     created_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
   })
 

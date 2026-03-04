@@ -58,5 +58,13 @@
   {
     "name": "listings",
     "isActive": "yes"
+  },
+  {
+    "name": "design_details_parser",
+    "isActive": "yes"
+  },
+  {
+    "name": "design_auto_import",
+    "isActive": "yes"
   }
 ]

@@ -10,5 +10,9 @@
   {
     "name": "commands",
     "isActive": "yes"
+  },
+  {
+    "name": "design_capture",
+    "isActive": "yes"
   }
 ]

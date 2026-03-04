@@ -91,6 +91,12 @@ function _G.AchaeadexLedger.Mudlet.init()
 
   _G.AchaeadexLedger.Mudlet.State = state
   _G.AchaeadexLedger.Mudlet.EventStore = store
+
+  local capture = _G.AchaeadexLedger.Mudlet.DesignCapture
+  if capture and type(capture.start) == "function" then
+    capture.start()
+  end
+
   out("AchaeadexLedger: ready (luasql)")
 end
 
