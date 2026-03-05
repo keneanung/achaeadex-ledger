@@ -117,6 +117,17 @@ local function compare_source_rows(sort_key)
   end
 end
 
+local function source_discipline(source)
+  local metadata = source.metadata or {}
+  if metadata.discipline and tostring(metadata.discipline) ~= "" then
+    return tostring(metadata.discipline)
+  end
+  if source.source_kind == "skill" then
+    return tostring(source.source_type or "skill")
+  end
+  return nil
+end
+
 function listings.list_commodities(state, opts)
   opts = opts or {}
   local inventory = get_inventory()
@@ -221,11 +232,21 @@ function listings.list_sources(state, opts)
   local include_aliases = opts.show_aliases == 1 or opts.show_aliases == true
 
   for _, source in pairs(state.production_sources or {}) do
+    local discipline = source_discipline(source)
+    local discipline_matches = true
+    if discipline_filter then
+      if discipline_filter == "skill" then
+        discipline_matches = source.source_kind == "skill"
+      else
+        discipline_matches = normalize_text(discipline) == normalize_text(discipline_filter)
+      end
+    end
+
     if (not opts.kind or source.source_kind == opts.kind)
       and (not opts.type or source.source_type == opts.type)
       and (not provenance_filter or source.provenance == provenance_filter)
       and (opts.recovery == nil or source.recovery_enabled == opts.recovery)
-      and (not discipline_filter or ((source.metadata and source.metadata.discipline) == discipline_filter))
+      and discipline_matches
       and source_matches_keywords(source, opts.q) then
       local aliases = collect_aliases_for_source(state, source.source_id, true)
       local alias_id = aliases[1] and aliases[1].alias_id or nil
@@ -234,7 +255,7 @@ function listings.list_sources(state, opts)
         source_id = source.source_id,
         source_kind = source.source_kind,
         source_type = source.source_type,
-        discipline = metadata.discipline,
+        discipline = discipline,
         design_type = source.source_type,
         name = source.name,
         short_desc = source.name,

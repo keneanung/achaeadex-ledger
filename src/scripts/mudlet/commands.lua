@@ -651,7 +651,7 @@ local help_topics = {
         example = "adex list patterns --status active"
       },
       {
-        usage = "adex list sources [--provenance public|organization|private|foreign|any] [--type <design_type>] [--discipline tailoring|jewellery|furniture|artistry|beverages|cooking|any] [--q <keywords>] [--limit <n>] [--offset <n>] [--sort newest|oldest|name|type] [--show-aliases 0|1]",
+        usage = "adex list sources [--kind design|skill] [--provenance public|organization|private|foreign|any] [--type <design_or_skill_type>] [--discipline tailoring|jewellery|furniture|artistry|beverages|cooking|forging|augmentation|skill|any] [--q <keywords>] [--limit <n>] [--offset <n>] [--sort newest|oldest|name|type] [--show-aliases 0|1]",
         example = "adex list sources --provenance private --q silver-threaded --limit 20"
       },
       {
@@ -2412,7 +2412,7 @@ function commands.handle(input)
       local provenance = flags.provenance or "any"
 
       local rows = listings.list_sources(state, {
-        kind = flags.kind or "design",
+        kind = flags.kind,
         type = flags.type,
         provenance = provenance,
         discipline = flags.discipline or "any",

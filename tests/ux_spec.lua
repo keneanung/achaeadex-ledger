@@ -149,8 +149,38 @@ describe("UX helpers", function()
       recovery_enabled = 0,
       metadata = { discipline = "jewellery", designer = "Ildiko", owner_raw = "the City of Hashan" }
     })
+    ledger.apply_source_create(state, "SK-FORGE", "skill", "forging", "Forging", {
+      provenance = "system",
+      recovery_enabled = 0
+    })
 
     ledger.apply_design_alias(state, "D-RING-1", "8238", "other", 1)
+
+    local all_rows = listings.list_sources(state, {
+      provenance = "any",
+      limit = 20,
+      offset = 0,
+      sort = "newest"
+    })
+    assert.are.equal(4, #all_rows)
+
+    local skill_rows = listings.list_sources(state, {
+      discipline = "skill",
+      limit = 20,
+      offset = 0,
+      sort = "newest"
+    })
+    assert.are.equal(1, #skill_rows)
+    assert.are.equal("SK-FORGE", skill_rows[1].source_id)
+
+    local forging_rows = listings.list_sources(state, {
+      discipline = "forging",
+      limit = 20,
+      offset = 0,
+      sort = "newest"
+    })
+    assert.are.equal(1, #forging_rows)
+    assert.are.equal("SK-FORGE", forging_rows[1].source_id)
 
     local private_rows = listings.list_sources(state, {
       kind = "design",
