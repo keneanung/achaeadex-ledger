@@ -97,6 +97,11 @@ function _G.AchaeadexLedger.Mudlet.init()
     capture.start()
   end
 
+  local checkpoint = _G.AchaeadexLedger.Mudlet.Checkpoint
+  if checkpoint and type(checkpoint.start) == "function" then
+    checkpoint.start()
+  end
+
   out("AchaeadexLedger: ready (luasql)")
 end
 

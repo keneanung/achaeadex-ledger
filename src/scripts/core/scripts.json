@@ -4,6 +4,10 @@
     "isActive": "yes"
   },
   {
+    "name": "checkpoint",
+    "isActive": "yes"
+  },
+  {
     "name": "inventory",
     "isActive": "yes"
   },

@@ -108,6 +108,16 @@ busted --verbose
 - Run `adex help` for a full command glossary and examples.
 - Use `adex config set color on|off` to toggle color output.
 
+### Temporary GMCP checkpoint helper
+
+`adex checkpoint` captures a temporary, in-memory snapshot of current GMCP-observed currencies, inventory, and rift contents.
+`adex checkpoint report` shows the delta since that snapshot.
+
+- This helper is temporary and intentionally disposable.
+- It does not write anything to the durable ledger or SQLite database.
+- It exists only to reduce manual counting and arithmetic before you decide what to record in the ledger.
+- Removing it later is isolated to the checkpoint core/mudlet modules plus the command wiring.
+
 ---
 
 ## Notes and limitations

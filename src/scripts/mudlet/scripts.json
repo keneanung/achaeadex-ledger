@@ -8,6 +8,10 @@
     "isActive": "yes"
   },
   {
+    "name": "checkpoint",
+    "isActive": "yes"
+  },
+  {
     "name": "commands",
     "isActive": "yes"
   },

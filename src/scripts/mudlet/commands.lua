@@ -760,6 +760,22 @@ local help_topics = {
       }
     }
   },
+  checkpoint = {
+    title = "Checkpoint",
+    purpose = "Capture a temporary in-memory GMCP checkpoint and report deltas since that checkpoint.",
+    commands = {
+      {
+        usage = "adex checkpoint",
+        example = "adex checkpoint",
+        notes = "Temporary helper only. Uses current GMCP state and does not write durable ledger events."
+      },
+      {
+        usage = "adex checkpoint report",
+        example = "adex checkpoint report",
+        notes = "Shows currencies, inventory, and rift deltas since the last checkpoint; unknown sections are reported cleanly."
+      }
+    }
+  },
   maintenance = {
     title = "Maintenance",
     purpose = "Rebuild projections, show DB stats, and manage game-time defaults/stats.",
@@ -835,7 +851,7 @@ function commands.help(topic)
     })
 
     render.section("Topics")
-    local order = { "inv", "broker", "pattern", "design", "source", "item", "order", "process", "craft", "forge", "augment", "sell", "report", "show", "list", "price", "config", "maintenance" }
+    local order = { "inv", "broker", "pattern", "design", "source", "item", "order", "process", "craft", "forge", "augment", "sell", "report", "show", "list", "price", "checkpoint", "config", "maintenance" }
     local rows = {}
     for _, topic_name in ipairs(order) do
       local entry = help_topics[topic_name]
@@ -862,7 +878,7 @@ function commands.help(topic)
   out_plain("  operational cost: material WAC + fees + time cost per item")
   out_plain("  true profit: profit after design and pattern capital recovery")
   out_plain("Commands:")
-  local order = { "inv", "broker", "pattern", "design", "source", "item", "order", "process", "craft", "forge", "augment", "sell", "report", "show", "list", "price", "config", "maintenance" }
+  local order = { "inv", "broker", "pattern", "design", "source", "item", "order", "process", "craft", "forge", "augment", "sell", "report", "show", "list", "price", "checkpoint", "config", "maintenance" }
   for _, topic_name in ipairs(order) do
     local entry = help_topics[topic_name]
     if entry then
@@ -961,6 +977,50 @@ function commands.handle(input)
   end
 
   local state = get_state()
+
+  if cmd == "checkpoint" then
+    local checkpoint = _G.AchaeadexLedger.Mudlet.Checkpoint
+    if not checkpoint then
+      error_out("checkpoint helper is not loaded")
+      return
+    end
+
+    if tokens[2] == nil then
+      local snapshot = checkpoint.capture_checkpoint()
+      if not snapshot then
+        error_out("unable to capture checkpoint")
+        return
+      end
+
+      render.section("Checkpoint")
+      render.kv_block({
+        { label = "Currencies", value = "tracked" },
+        { label = "Inventory", value = snapshot.inventory and "known" or "unknown" },
+        { label = "Rift", value = snapshot.rift and "known" or "unknown" }
+      })
+      render.print("Checkpoint captured in memory only.")
+      return
+    end
+
+    if tokens[2] == "report" and tokens[3] == nil then
+      local diff, lines = checkpoint.report_since_checkpoint()
+      if not diff then
+        error_out(lines or "no checkpoint captured")
+        return
+      end
+
+      local report_lines = type(lines) == "table" and lines or { tostring(lines or "") }
+
+      render.section("Checkpoint Delta")
+      for _, line in ipairs(report_lines) do
+        render.print(line)
+      end
+      return
+    end
+
+    error_out("usage: adex checkpoint | adex checkpoint report")
+    return
+  end
 
   if cmd == "maintenance" and tokens[2] == "stats" then
     local store = _G.AchaeadexLedger.Mudlet.EventStore
