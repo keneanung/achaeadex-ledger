@@ -5,6 +5,7 @@ describe("Forge and augment workflows", function()
   local reports
   local inventory
   local memory_store
+  local json
 
   before_each(function()
     _G.AchaeadexLedger = nil
@@ -14,6 +15,7 @@ describe("Forge and augment workflows", function()
     dofile("src/scripts/core/pattern_pools.lua")
     dofile("src/scripts/core/production_sources.lua")
     dofile("src/scripts/core/recovery.lua")
+    dofile("src/scripts/core/costing.lua")
     dofile("src/scripts/core/ledger.lua")
     dofile("src/scripts/core/reports.lua")
     dofile("src/scripts/core/storage/memory_event_store.lua")
@@ -22,6 +24,7 @@ describe("Forge and augment workflows", function()
     reports = _G.AchaeadexLedger.Core.Reports
     inventory = _G.AchaeadexLedger.Core.Inventory
     memory_store = _G.AchaeadexLedger.Core.MemoryEventStore
+    json = _G.AchaeadexLedger.Core.Json
   end)
 
   it("forge fire -> craft -> attach -> close allocates coal deterministically", function()
@@ -54,6 +57,15 @@ describe("Forge and augment workflows", function()
     assert.are.equal(107, state.crafted_items["I2"].operational_cost_gold)
     assert.are.equal(13, state.crafted_items["I1"].forge_allocated_coal_gold)
     assert.are.equal(7, state.crafted_items["I2"].forge_allocated_coal_gold)
+
+    local breakdown1 = json.decode(state.crafted_items["I1"].cost_breakdown_json)
+    local breakdown2 = json.decode(state.crafted_items["I2"].cost_breakdown_json)
+    assert.are.equal(200, breakdown1.base_operational_cost_gold)
+    assert.are.equal(13, breakdown1.allocated_session_cost_gold)
+    assert.are.equal(213, breakdown1.total_operational_cost_gold)
+    assert.are.equal(100, breakdown2.base_operational_cost_gold)
+    assert.are.equal(7, breakdown2.allocated_session_cost_gold)
+    assert.are.equal(107, breakdown2.total_operational_cost_gold)
 
     assert.are.equal("closed", state.forge_sessions["F1"].status)
     assert.are.equal(20, state.forge_sessions["F1"].allocated_total_gold)
@@ -92,9 +104,16 @@ describe("Forge and augment workflows", function()
       fee_gold = 25
     })
 
+    local breakdown = json.decode(state.crafted_items["I-AUG"].cost_breakdown_json)
     assert.are.equal(1, state.crafted_items["I-BASE"].transformed)
     assert.are.equal("I-BASE", state.crafted_items["I-AUG"].parent_item_id)
     assert.are.equal(165, state.crafted_items["I-AUG"].operational_cost_gold)
+    assert.are.equal(40, breakdown.carried_basis_gold)
+    assert.are.equal(100, breakdown.materials_cost_gold)
+    assert.are.equal(25, breakdown.direct_fee_gold)
+    assert.are.equal(0, breakdown.per_item_fee_gold)
+    assert.are.equal(0, breakdown.allocated_session_cost_gold)
+    assert.are.equal(165, breakdown.total_operational_cost_gold)
     assert.are.equal("I-BASE", state.item_transformations["I-AUG"].old_item_id)
   end)
 

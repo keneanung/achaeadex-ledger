@@ -47,6 +47,14 @@ local function get_pricing()
   return _G.AchaeadexLedger.Core.Pricing
 end
 
+local function get_costing()
+  if not _G.AchaeadexLedger or not _G.AchaeadexLedger.Core or not _G.AchaeadexLedger.Core.Costing then
+    error("AchaeadexLedger.Core.Costing is not loaded")
+  end
+
+  return _G.AchaeadexLedger.Core.Costing
+end
+
 local function tokenize(input)
   local tokens = {}
   local i = 1
@@ -311,6 +319,15 @@ local function render_totals(render, totals)
     { label = "Process losses", value = fmt(totals.process_losses or 0) },
     { label = "True profit", value = fmt(totals.true_profit or 0) }
   }
+  if totals.process_revenue ~= nil then
+    table.insert(rows, { label = "Process revenue", value = fmt(totals.process_revenue) })
+  end
+  if totals.process_total_cost ~= nil then
+    table.insert(rows, { label = "Process total cost", value = fmt(totals.process_total_cost) })
+  end
+  if totals.process_net_result ~= nil then
+    table.insert(rows, { label = "Process net result", value = fmt(totals.process_net_result) })
+  end
   if totals.process_losses_attributed ~= nil then
     table.insert(rows, { label = "Process losses attributed", value = fmt(totals.process_losses_attributed) })
   end
@@ -486,15 +503,15 @@ local help_topics = {
   },
   process = {
     title = "Process",
-    purpose = "Run immediate or deferred processes.",
+    purpose = "Run immediate or deferred processes. Active processes accrue time cost automatically after the cutover; passive ones do not. Immediate processes only accrue time cost when --time is supplied. Use --revenue for session gold; commodities in --outputs are always inventory-valued outputs.",
     commands = {
       {
-        usage = "adex process apply <process_id> --inputs k=v,... --outputs k=v,... [--fee <gold>] [--note <text>]",
-        example = "adex process apply refine --inputs fibre=4,coal=4 --outputs cloth=4"
+        usage = "adex process apply <process_id> [--inputs k=v,...] --outputs k=v,... [--revenue <gold>] [--fee <gold>] [--passive 0|1] [--time <hours>] [--note <text>]",
+        example = "adex process apply hunting --inputs curatives=2 --revenue 1500 --time 1.5"
       },
       {
-        usage = "adex process start [<process_instance_id>] <process_id> [--inputs k=v,...] [--fee <gold>] [--note <text>]",
-        example = "adex process start smelt --inputs ore=5"
+        usage = "adex process start [<process_instance_id>] <process_id> [--inputs k=v,...] [--fee <gold>] [--passive 0|1] [--note <text>]",
+        example = "adex process start hunting --inputs curatives=2 --passive 0"
       },
       {
         usage = "adex process add-inputs <process_instance_id> --inputs k=v,... [--note <text>]",
@@ -505,11 +522,14 @@ local help_topics = {
         example = "adex process add-fee X-20260215-0001 --fee 4"
       },
       {
-        usage = "adex process complete <process_instance_id> [--outputs k=v,...] [--note <text>]",
-        example = "adex process complete X-20260215-0001"
+        usage = "adex process complete <process_instance_id> [--outputs k=v,...] [--revenue <gold>] [--note <text>]",
+        example = "adex process complete X-20260215-0001",
+        extra_examples = {
+          "adex process complete X-20260215-0001 --revenue 1500"
+        }
       },
       {
-        usage = "adex process abort <process_instance_id> [--returned k=v,...] [--lost k=v,...] [--outputs k=v,...] [--note <text>]",
+        usage = "adex process abort <process_instance_id> [--returned k=v,...] [--lost k=v,...] [--outputs k=v,...] [--revenue <gold>] [--note <text>]",
         example = "adex process abort X-20260215-0001"
       },
       {
@@ -614,8 +634,18 @@ local help_topics = {
   },
   price = {
     title = "Price",
-    purpose = "Suggest prices from craft cost basis (advisory only).",
+    purpose = "Suggest advisory prices from craft or commodity cost basis. Commodity pricing uses current WAC, supports stack quantities, and treats totals as primary while unit prices are informational.",
     commands = {
+      {
+        usage = "adex price commodity <commodity> [--qty <n>] [--tier low|mid|high|all] [--round <gold>] [--extra <gold>]",
+        example = "adex price commodity leather",
+        extra_examples = {
+          "adex price commodity leather --qty 25",
+          "adex price commodity silver --qty 10 --tier mid",
+          "adex price commodity wood --qty 100 --extra 500"
+        },
+        notes = "Uses current WAC for the commodity. Supports arbitrary quantities. Suggested totals are the primary output; unit suggestions are informational only."
+      },
       {
         usage = "adex price quote <source_id_or_alias> [--qty <n>] [--tier low|mid|high|all] [--round <gold>] [--time <hours>] [--extra <gold>] [--materials k=v,...]",
         example = "adex price quote 1234 --qty 2 --tier mid --time 0.5 --extra 50"
@@ -655,8 +685,8 @@ local help_topics = {
         example = "adex list sources --provenance private --q silver-threaded --limit 20"
       },
       {
-        usage = "adex show source <source_id_or_alias>",
-        example = "adex show source 8238"
+        usage = "adex list items [--source <design_id>] [--sold 0|1] [--transformed 0|1] [--unresolved 1]",
+        example = "adex list items --unresolved 1"
       },
       {
         usage = "adex list items [--source <design_id>] [--sold 0|1] [--transformed 0|1] [--unresolved 1]",
@@ -677,6 +707,16 @@ local help_topics = {
       {
         usage = "adex list forge [--status in_flight|closed|expired] [--source <source_id>]",
         example = "adex list forge --status in_flight"
+      }
+    }
+  },
+  show = {
+    title = "Show",
+    purpose = "Show detailed views for single entities.",
+    commands = {
+      {
+        usage = "adex show source <source_id_or_alias>",
+        example = "adex show source 8238"
       }
     }
   },
@@ -703,12 +743,20 @@ local help_topics = {
         example = "adex config set time-cost 25"
       },
       {
+        usage = "adex config set process-time-cutover <iso8601_utc>",
+        example = "adex config set process-time-cutover 2026-03-13T00:00:00Z"
+      },
+      {
         usage = "adex config get color",
         example = "adex config get color"
       },
       {
         usage = "adex config get time-cost",
         example = "adex config get time-cost"
+      },
+      {
+        usage = "adex config get process-time-cutover",
+        example = "adex config get process-time-cutover"
       }
     }
   },
@@ -745,10 +793,17 @@ function commands.help(topic)
       render.print(entry.purpose)
       for index, command in ipairs(entry.commands or {}) do
         render.section("Command " .. tostring(index))
-        render.kv_block({
+        local rows = {
           { label = "Usage", value = command.usage },
           { label = "Example", value = command.example }
-        })
+        }
+        if command.notes then
+          table.insert(rows, { label = "Notes", value = command.notes })
+        end
+        if command.extra_examples and #command.extra_examples > 0 then
+          table.insert(rows, { label = "More examples", value = table.concat(command.extra_examples, "\n") })
+        end
+        render.kv_block(rows)
       end
       return
     end
@@ -757,6 +812,12 @@ function commands.help(topic)
     for _, command in ipairs(entry.commands or {}) do
       out_plain("  Usage: " .. command.usage)
       out_plain("  Example: " .. command.example)
+      if command.notes then
+        out_plain("  Notes: " .. command.notes)
+      end
+      for _, extra_example in ipairs(command.extra_examples or {}) do
+        out_plain("  Example: " .. extra_example)
+      end
     end
     return
   end
@@ -774,7 +835,7 @@ function commands.help(topic)
     })
 
     render.section("Topics")
-    local order = { "inv", "broker", "pattern", "design", "source", "item", "order", "process", "craft", "forge", "augment", "sell", "report", "list", "price", "config", "maintenance" }
+    local order = { "inv", "broker", "pattern", "design", "source", "item", "order", "process", "craft", "forge", "augment", "sell", "report", "show", "list", "price", "config", "maintenance" }
     local rows = {}
     for _, topic_name in ipairs(order) do
       local entry = help_topics[topic_name]
@@ -801,7 +862,7 @@ function commands.help(topic)
   out_plain("  operational cost: material WAC + fees + time cost per item")
   out_plain("  true profit: profit after design and pattern capital recovery")
   out_plain("Commands:")
-  local order = { "inv", "broker", "pattern", "design", "source", "item", "order", "process", "craft", "forge", "augment", "sell", "report", "list", "price", "config", "maintenance" }
+  local order = { "inv", "broker", "pattern", "design", "source", "item", "order", "process", "craft", "forge", "augment", "sell", "report", "show", "list", "price", "config", "maintenance" }
   for _, topic_name in ipairs(order) do
     local entry = help_topics[topic_name]
     if entry then
@@ -859,7 +920,21 @@ function commands.handle(input)
       error_out("usage: adex config set time-cost <gold_per_hour>")
       return
     end
+    local state = get_state()
     config.set("time_cost_per_hour", math.floor(value))
+    ledger.apply_process_time_cost_rate(state, math.floor(value))
+    out("OK")
+    return
+  end
+
+  if cmd == "config" and tokens[2] == "set" and tokens[3] == "process-time-cutover" then
+    local value = tokens[4]
+    if not value then
+      error_out("usage: adex config set process-time-cutover <iso8601_utc>")
+      return
+    end
+    local state = get_state()
+    ledger.apply_process_time_cost_cutover(state, value)
     out("OK")
     return
   end
@@ -870,8 +945,18 @@ function commands.handle(input)
   end
 
   if cmd == "config" and tokens[2] == "get" and tokens[3] == "time-cost" then
-    local value = config.get_time_cost_per_hour and config.get_time_cost_per_hour() or config.get("time_cost_per_hour") or 0
+    local state = get_state()
+    local value = state.process_time_cost_gold_per_hour
+    if value == nil then
+      value = config.get_time_cost_per_hour and config.get_time_cost_per_hour() or config.get("time_cost_per_hour") or 0
+    end
     out("time_cost_per_hour: " .. tostring(value))
+    return
+  end
+
+  if cmd == "config" and tokens[2] == "get" and tokens[3] == "process-time-cutover" then
+    local state = get_state()
+    out("process_time_cost_enabled_from_ts: " .. tostring(state.process_time_cost_enabled_from_ts))
     return
   end
 
@@ -1630,7 +1715,7 @@ function commands.handle(input)
     end
 
     local time_cost_per_hour = config.get_time_cost_per_hour and config.get_time_cost_per_hour() or (tonumber(config.get("time_cost_per_hour")) or 0)
-    local time_cost = math.floor((time_hours or 0) * time_cost_per_hour)
+    local time_cost = get_costing().compute_time_cost_from_hours(time_hours or 0, time_cost_per_hour).amount_gold
     local game_time = get_game_time()
     ledger.apply_source_craft_auto(state, item_id, source_id, "skill", {
       source_type = "forging",
@@ -1689,7 +1774,7 @@ function commands.handle(input)
     end
 
     local time_cost_per_hour = config.get_time_cost_per_hour and config.get_time_cost_per_hour() or (tonumber(config.get("time_cost_per_hour")) or 0)
-    local time_cost = math.floor((time_hours or 0) * time_cost_per_hour)
+    local time_cost = get_costing().compute_time_cost_from_hours(time_hours or 0, time_cost_per_hour).amount_gold
     local game_time = get_game_time()
     ledger.apply_augment_item(state, new_item_id, source_id, target_item_id, {
       materials = materials,
@@ -1865,7 +1950,7 @@ function commands.handle(input)
   if cmd == "process" and tokens[2] == "apply" then
     local process_id = tokens[3]
     local args, flags = parse_flags(tokens, 4)
-    local parse_err = validate_known_flags(flags, { "inputs", "outputs", "fee", "note" }) or validate_no_extra_args(args)
+    local parse_err = validate_known_flags(flags, { "inputs", "outputs", "revenue", "fee", "note", "passive", "time" }) or validate_no_extra_args(args)
     if parse_err then
       error_out(parse_err)
       return
@@ -1873,12 +1958,42 @@ function commands.handle(input)
     local inputs = parse_kv_list(flags.inputs)
     local outputs = parse_kv_list(flags.outputs)
     local fee = flags.fee and tonumber(flags.fee) or 0
-    if not process_id or not flags.inputs or not flags.outputs then
-      error_out("usage: adex process apply <process_id> --inputs k=v,... --outputs k=v,... [--fee <gold>] [--note <text>]")
+    local revenue_gold = 0
+    local passive = flags.passive and tonumber(flags.passive) or nil
+    local time_hours = flags.time and tonumber(flags.time) or nil
+    if not process_id or not flags.outputs then
+      error_out("usage: adex process apply <process_id> [--inputs k=v,...] --outputs k=v,... [--revenue <gold>] [--fee <gold>] [--passive 0|1] [--time <hours>] [--note <text>]")
+      return
+    end
+    if flags.revenue ~= nil then
+      revenue_gold = tonumber(flags.revenue)
+      if revenue_gold == nil then
+        error_out("--revenue must be a non-negative gold amount")
+        return
+      end
+    end
+    if revenue_gold < 0 then
+      error_out("--revenue must be a non-negative gold amount")
+      return
+    end
+    if passive ~= nil and passive ~= 0 and passive ~= 1 then
+      error_out("--passive must be 0 or 1")
+      return
+    end
+    if time_hours ~= nil and time_hours < 0 then
+      error_out("--time must be a non-negative number of hours")
       return
     end
     local game_time = get_game_time()
-    ledger.apply_process(state, process_id, inputs, outputs, fee, game_time)
+    ledger.apply_process(state, process_id, inputs, outputs, fee, game_time, {
+      note = flags.note,
+      passive = passive,
+      time_hours = time_hours,
+      revenue_gold = revenue_gold,
+      process_instance_id = id_generator.generate("X", function(id)
+        return state.process_instances[id] ~= nil
+      end)
+    })
     out("OK")
     return
   end
@@ -1941,7 +2056,7 @@ function commands.handle(input)
 
   if cmd == "process" and tokens[2] == "start" then
     local args, flags = parse_flags(tokens, 3)
-    local parse_err = validate_known_flags(flags, { "inputs", "fee", "note" })
+    local parse_err = validate_known_flags(flags, { "inputs", "fee", "note", "passive" })
     if parse_err then
       error_out(parse_err)
       return
@@ -1958,8 +2073,13 @@ function commands.handle(input)
     local inputs = parse_kv_list(flags.inputs)
     local fee = flags.fee and tonumber(flags.fee) or 0
     local note = flags.note
+    local passive = flags.passive and tonumber(flags.passive) or nil
     if not process_id then
-      error_out("usage: adex process start [<process_instance_id>] <process_id> [--inputs k=v,...] [--fee <gold>] [--note <text>]")
+      error_out("usage: adex process start [<process_instance_id>] <process_id> [--inputs k=v,...] [--fee <gold>] [--passive 0|1] [--note <text>]")
+      return
+    end
+    if passive ~= nil and passive ~= 0 and passive ~= 1 then
+      error_out("--passive must be 0 or 1")
       return
     end
 
@@ -1970,7 +2090,9 @@ function commands.handle(input)
       out("created_id: " .. tostring(process_instance_id))
     end
     local game_time = get_game_time()
-    ledger.apply_process_start(state, process_instance_id, process_id, inputs, fee, note, game_time)
+    ledger.apply_process_start(state, process_instance_id, process_id, inputs, fee, note, game_time, {
+      passive = passive
+    })
     out("OK")
     return
   end
@@ -2018,19 +2140,33 @@ function commands.handle(input)
   if cmd == "process" and tokens[2] == "complete" then
     local process_instance_id = tokens[3]
     local args, flags = parse_flags(tokens, 4)
-    local parse_err = validate_known_flags(flags, { "outputs", "note" }) or validate_no_extra_args(args)
+    local parse_err = validate_known_flags(flags, { "outputs", "revenue", "note" }) or validate_no_extra_args(args)
     if parse_err then
       error_out(parse_err)
       return
     end
     local outputs = flags.outputs and parse_kv_list(flags.outputs) or {}
+    local revenue_gold = 0
     local note = flags.note
     if not process_instance_id then
-      error_out("usage: adex process complete <process_instance_id> [--outputs k=v,...] [--note <text>]")
+      error_out("usage: adex process complete <process_instance_id> [--outputs k=v,...] [--revenue <gold>] [--note <text>]")
+      return
+    end
+    if flags.revenue ~= nil then
+      revenue_gold = tonumber(flags.revenue)
+      if revenue_gold == nil then
+        error_out("--revenue must be a non-negative gold amount")
+        return
+      end
+    end
+    if revenue_gold < 0 then
+      error_out("--revenue must be a non-negative gold amount")
       return
     end
     local game_time = get_game_time()
-    ledger.apply_process_complete(state, process_instance_id, outputs, note, game_time)
+    ledger.apply_process_complete(state, process_instance_id, outputs, note, game_time, {
+      revenue_gold = revenue_gold
+    })
     out("OK")
     return
   end
@@ -2038,7 +2174,7 @@ function commands.handle(input)
   if cmd == "process" and tokens[2] == "abort" then
     local process_instance_id = tokens[3]
     local args, flags = parse_flags(tokens, 4)
-    local parse_err = validate_known_flags(flags, { "returned", "lost", "outputs", "note" }) or validate_no_extra_args(args)
+    local parse_err = validate_known_flags(flags, { "returned", "lost", "outputs", "revenue", "note" }) or validate_no_extra_args(args)
     if parse_err then
       error_out(parse_err)
       return
@@ -2046,9 +2182,21 @@ function commands.handle(input)
     local returned = flags.returned and parse_kv_list(flags.returned) or {}
     local lost = flags.lost and parse_kv_list(flags.lost) or {}
     local outputs = flags.outputs and parse_kv_list(flags.outputs) or {}
+    local revenue_gold = 0
     local note = flags.note
     if not process_instance_id then
-      error_out("usage: adex process abort <process_instance_id> [--returned k=v,...] [--lost k=v,...] [--outputs k=v,...] [--note <text>]")
+      error_out("usage: adex process abort <process_instance_id> [--returned k=v,...] [--lost k=v,...] [--outputs k=v,...] [--revenue <gold>] [--note <text>]")
+      return
+    end
+    if flags.revenue ~= nil then
+      revenue_gold = tonumber(flags.revenue)
+      if revenue_gold == nil then
+        error_out("--revenue must be a non-negative gold amount")
+        return
+      end
+    end
+    if revenue_gold < 0 then
+      error_out("--revenue must be a non-negative gold amount")
       return
     end
     local game_time = get_game_time()
@@ -2056,7 +2204,9 @@ function commands.handle(input)
       returned = returned,
       lost = lost,
       outputs = outputs
-    }, note, game_time)
+    }, note, game_time, {
+      revenue_gold = revenue_gold
+    })
     out("OK")
     return
   end
@@ -2168,7 +2318,7 @@ function commands.handle(input)
     end
 
     local time_cost_per_hour = config.get_time_cost_per_hour and config.get_time_cost_per_hour() or (tonumber(config.get("time_cost_per_hour")) or 0)
-    local time_cost = math.floor(time_hours * time_cost_per_hour)
+    local time_cost = get_costing().compute_time_cost_from_hours(time_hours, time_cost_per_hour).amount_gold
     if manual_cost ~= nil and not materials then
       render.warning("WARNING: Manual craft cost used; no materials recorded.")
     end
@@ -2893,10 +3043,17 @@ function commands.handle(input)
       { label = "Process instance", value = report.process_instance_id },
       { label = "Process id", value = report.process_id },
       { label = "Status", value = report.status },
+      { label = "Passive", value = report.passive == 1 and "yes" or "no" },
       { label = "Started", value = report.started_at or "" },
       { label = "Completed", value = report.completed_at or "" },
+      { label = "Elapsed seconds", value = tostring(report.elapsed_seconds or 0) },
+      { label = "Revenue", value = fmt(report.revenue_gold or 0) },
       { label = "Committed input cost", value = fmt(report.committed_cost_gold) },
+      { label = "Direct fees", value = fmt(report.direct_fee_gold) },
+      { label = "Time cost", value = fmt(report.time_cost_gold) },
       { label = "Fees", value = fmt(report.fees_gold) },
+      { label = "Total process cost", value = fmt(report.total_process_cost_gold or 0) },
+      { label = "Net result", value = fmt(report.net_result_gold or 0) },
       { label = "Total committed", value = fmt(report.total_committed_gold) },
       { label = "Write-offs", value = fmt(report.write_off_total_gold) },
       { label = "Note", value = report.note or "" }
@@ -3075,6 +3232,94 @@ function commands.handle(input)
     return
   end
 
+  if cmd == "price" and tokens[2] == "commodity" then
+    local commodity = tokens[3]
+    local args, flags = parse_flags(tokens, 4)
+    local parse_err = validate_known_flags(flags, { "qty", "tier", "round", "extra" }) or validate_no_extra_args(args)
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
+
+    local qty = flags.qty and tonumber(flags.qty) or 1
+    local tier = flags.tier or "all"
+    local round_to = flags.round and tonumber(flags.round) or nil
+    local extra_gold = flags.extra and tonumber(flags.extra) or 0
+
+    if not commodity then
+      error_out("usage: adex price commodity <commodity> [--qty <n>] [--tier low|mid|high|all] [--round <gold>] [--extra <gold>]")
+      return
+    end
+    if qty == nil or qty <= 0 then
+      error_out("--qty must be > 0")
+      return
+    end
+    if extra_gold == nil or extra_gold < 0 then
+      error_out("--extra must be >= 0")
+      return
+    end
+    if tier ~= "low" and tier ~= "mid" and tier ~= "high" and tier ~= "all" then
+      error_out("usage: adex price commodity <commodity> [--qty <n>] [--tier low|mid|high|all] [--round <gold>] [--extra <gold>]")
+      return
+    end
+
+    local ok, suggestion = pcall(function()
+      return pricing.suggest_commodity(state, commodity, {
+        qty = qty,
+        tier = tier,
+        round = round_to,
+        extra_gold = extra_gold
+      })
+    end)
+    if not ok then
+      error_out(suggestion)
+      return
+    end
+
+    local fmt = render.format_gold or tostring
+    render.section("Commodity Price Suggest")
+    render.kv_block({
+      { label = "Commodity", value = suggestion.commodity },
+      { label = "Qty", value = tostring(suggestion.qty) },
+      { label = "Unit WAC", value = fmt(suggestion.unit_wac) },
+      { label = "Base cost", value = fmt(suggestion.base_cost_total) },
+      { label = "Extra", value = fmt(suggestion.extra_gold or 0) },
+      { label = "Rounded base", value = fmt(suggestion.rounded_base_total) },
+      { label = "Tier", value = suggestion.tier },
+      { label = "Round step", value = fmt(suggestion.round_to_gold or 0) }
+    })
+
+    render.section("Suggested Prices")
+    local rows = {}
+    if suggestion.suggested_total.low then
+      table.insert(rows, {
+        tier = "low",
+        total = fmt(suggestion.suggested_total.low),
+        unit = fmt(suggestion.suggested_unit.low)
+      })
+    end
+    if suggestion.suggested_total.mid then
+      table.insert(rows, {
+        tier = "mid",
+        total = fmt(suggestion.suggested_total.mid),
+        unit = fmt(suggestion.suggested_unit.mid)
+      })
+    end
+    if suggestion.suggested_total.high then
+      table.insert(rows, {
+        tier = "high",
+        total = fmt(suggestion.suggested_total.high),
+        unit = fmt(suggestion.suggested_unit.high)
+      })
+    end
+    render.table(rows, {
+      { key = "tier", label = "Tier", nowrap = true, min = 4 },
+      { key = "total", label = "Suggested Total", align = "right", min = 15 },
+      { key = "unit", label = "Suggested Unit", align = "right", min = 14 }
+    })
+    return
+  end
+
   if cmd == "price" and tokens[2] == "quote" then
     local source_id_or_alias = tokens[3]
     local args, flags = parse_flags(tokens, 4)
@@ -3171,10 +3416,10 @@ function commands.handle(input)
 
     render.section("Base Cost")
     render.kv_block({
-      { label = "Materials", value = fmt(quote.components.materials_cost or 0) },
-      { label = "Per-item fee", value = fmt(quote.components.per_item_fee or 0) },
-      { label = "Time cost", value = fmt(quote.components.time_cost or 0) },
-      { label = "Extra", value = fmt(quote.components.extra or 0) },
+      { label = "Materials", value = fmt(quote.components.materials_cost_gold or 0) },
+      { label = "Per-item fee", value = fmt(quote.components.per_item_fee_gold or 0) },
+      { label = "Time cost", value = fmt(quote.components.time_cost_gold or 0) },
+      { label = "Extra", value = fmt(quote.components.direct_fee_gold or 0) },
       { label = "Base cost", value = fmt(quote.base_cost or 0) },
       { label = "Rounded base", value = fmt(quote.rounded_base or 0) }
     })

@@ -289,6 +289,7 @@ function sqlite_store:domain_counts()
     "order_sales",
     "order_settlements",
     "process_instances",
+    "process_time_costs",
     "process_game_time_overrides",
     "ledger_game_year_defaults",
     "process_write_offs",

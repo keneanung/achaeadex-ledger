@@ -85,6 +85,27 @@ Expected:
 - fee 4 is sunk
 - process instance status == aborted
 
+PROCESS TIME COST ADDENDUM
+------------------------------------------------------------
+
+Required coverage:
+1) Active deferred process completion emits PROCESS_ADD_TIME_COST using elapsed wall-clock time.
+2) Active deferred process abort emits PROCESS_ADD_TIME_COST using elapsed wall-clock time.
+3) Passive deferred processes do not emit PROCESS_ADD_TIME_COST.
+4) Immediate PROCESS_APPLY emits PROCESS_ADD_TIME_COST only when explicit duration is provided.
+5) Immediate PROCESS_APPLY without duration accrues no time cost.
+6) Processes started before the configured cutover behave as passive by default.
+7) Rebuild path preserves process passive state and process time-cost projections deterministically.
+8) Shared costing helpers use deterministic rounding: ceil(elapsed_seconds * rate / 3600).
+9) Cost breakdown keys remain standardized where applicable:
+  - materials_cost_gold
+  - per_item_fee_gold
+  - time_cost_gold
+  - direct_fee_gold
+  - allocated_session_cost_gold
+  - carried_basis_gold
+  - total_operational_cost_gold
+
 ------------------------------------------------------------
 TEST 6 – PROCESS_COMPLETE WITH NO OUTPUTS CREATES WRITE-OFF
 ------------------------------------------------------------
@@ -115,6 +136,21 @@ Expected:
 - committed_basis == 50
 - output_basis == 30
 - PROCESS_WRITE_OFF.amount_gold == 20
+
+------------------------------------------------------------
+TEST 7B – PROCESS GOLD OUTPUT REPORTING
+------------------------------------------------------------
+
+Given:
+- a deferred or immediate process with committed inputs and/or fees
+When:
+- the process records explicit `revenue_gold`
+Expected:
+- explicit revenue is reported as process revenue
+- explicit revenue does not create inventory commodity rows
+- total process cost remains committed inputs + fees + time cost
+- net result == revenue - total process cost
+- rebuild reproduces the same revenue and net-result values deterministically
 
 ------------------------------------------------------------
 TEST 8 – PATTERN RECOVERY WATERFALL: DESIGN FIRST

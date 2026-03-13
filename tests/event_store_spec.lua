@@ -19,6 +19,7 @@ describe("EventStore", function()
     dofile("src/scripts/core/projector.lua")
     dofile("src/scripts/core/reports.lua")
     dofile("src/scripts/core/schema.lua")
+    dofile("src/scripts/core/costing.lua")
     dofile("src/scripts/core/ledger.lua")
     dofile("src/scripts/core/storage/memory_event_store.lua")
     dofile("src/scripts/core/storage/sqlite_event_store.lua")
@@ -338,5 +339,86 @@ describe("EventStore", function()
 
     assert.is_not_nil(row)
     assert.are.equal(998, tonumber(row.resolved_game_year))
+  end)
+
+  it("rebuild preserves deferred process passive state and time-cost rows", function()
+    if not luasql then
+      pending("LuaSQL sqlite3 not available")
+      return
+    end
+
+    local db_path = os.tmpname()
+    local store = sqlite_store.new(db_path)
+    local state = ledger.new(store)
+
+    ledger.apply_process_time_cost_rate(state, 25)
+    ledger.apply_process_time_cost_cutover(state, "2026-03-01T00:00:00Z")
+    ledger.apply_opening_inventory(state, "ore", 10, 10)
+    ledger.apply_process_start(state, "PX-TIME-RB", "smelt", { ore = 5 }, 0, nil, nil, {
+      started_at = "2026-03-13T00:00:00Z"
+    })
+    ledger.apply_process_complete(state, "PX-TIME-RB", {}, nil, nil, {
+      completed_at = "2026-03-13T01:30:00Z"
+    })
+
+    store:rebuild_projections()
+
+    local cur1 = assert(store.conn:execute("SELECT passive, status FROM process_instances WHERE process_instance_id = 'PX-TIME-RB'"))
+    local row1 = cur1:fetch({}, "a")
+    cur1:close()
+    assert.is_not_nil(row1)
+    assert.are.equal(0, tonumber(row1.passive))
+    assert.are.equal("completed", row1.status)
+
+    local cur2 = assert(store.conn:execute("SELECT amount_gold, elapsed_seconds, rate_gold_per_hour FROM process_time_costs WHERE process_instance_id = 'PX-TIME-RB'"))
+    local row2 = cur2:fetch({}, "a")
+    cur2:close()
+    assert.is_not_nil(row2)
+    assert.are.equal(38, tonumber(row2.amount_gold))
+    assert.are.equal(5400, tonumber(row2.elapsed_seconds))
+    assert.are.equal(25, tonumber(row2.rate_gold_per_hour))
+  end)
+
+  it("rebuild preserves process revenue and net result for explicit revenue fields", function()
+    if not luasql then
+      pending("LuaSQL sqlite3 not available")
+      return
+    end
+
+    local reports = _G.AchaeadexLedger.Core.Reports
+    local mem = memory_store.new()
+    local state1 = ledger.new(mem)
+
+    ledger.apply_opening_inventory(state1, "curatives", 10, 15)
+    ledger.apply_process_start(state1, "PX-GOLD", "hunting", { curatives = 2 }, 50, nil, { year = 703 })
+    ledger.apply_process_add_inputs(state1, "PX-GOLD", { curatives = 1 })
+    ledger.apply_process_complete(state1, "PX-GOLD", {}, nil, { year = 703 }, {
+      revenue_gold = 500
+    })
+
+    local report1 = reports.process(state1, "PX-GOLD")
+
+    local db_path = os.tmpname()
+    local sqlite = sqlite_store.new(db_path)
+    for _, event in ipairs(mem:read_all()) do
+      sqlite:append({ event_type = event.event_type, payload = event.payload, ts = event.ts })
+    end
+
+    local mem2 = memory_store.new()
+    local state2 = ledger.new(mem2)
+    for _, event in ipairs(sqlite:read_all()) do
+      ledger.apply_event(state2, event)
+    end
+
+    local report2 = reports.process(state2, "PX-GOLD")
+    local year2 = reports.year(state2, 703)
+
+    assert.are.equal(report1.revenue_gold, report2.revenue_gold)
+    assert.are.equal(report1.total_process_cost_gold, report2.total_process_cost_gold)
+    assert.are.equal(report1.net_result_gold, report2.net_result_gold)
+    assert.are.equal(500, year2.totals.process_revenue)
+    assert.are.equal(95, year2.totals.process_total_cost)
+    assert.are.equal(405, year2.totals.process_net_result)
+    assert.are.equal(0, inventory.get_qty(state2.inventory, "gold"))
   end)
 end)

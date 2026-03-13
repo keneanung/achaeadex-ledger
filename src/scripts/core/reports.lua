@@ -115,6 +115,33 @@ local function process_write_off_summary(state, year)
   return summary
 end
 
+local function process_revenue_summary(state, year)
+  local summary = {
+    revenue = 0,
+    total_cost = 0,
+    net_result = 0,
+    count = 0,
+    has_revenue = false
+  }
+
+  for _, instance in pairs(state.process_instances or {}) do
+    local revenue = round_gold(instance.revenue_gold or 0)
+    if revenue > 0 then
+      local resolved_year = instance.revenue_resolved_game_year and tonumber(instance.revenue_resolved_game_year) or nil
+      if not year or resolved_year == tonumber(year) then
+        local total_cost = round_gold((instance.committed_cost_total or 0) + (instance.fees_total or 0))
+        summary.revenue = summary.revenue + revenue
+        summary.total_cost = summary.total_cost + total_cost
+        summary.net_result = summary.net_result + (revenue - total_cost)
+        summary.count = summary.count + 1
+        summary.has_revenue = true
+      end
+    end
+  end
+
+  return summary
+end
+
 local function unallocated_forge_session_costs(state)
   local total = 0
   local in_flight_count = 0
@@ -405,6 +432,7 @@ function reports.overall(state, opts)
   end
   local totals = sum_totals(sales)
   local process_loss_summary = process_write_off_summary(state)
+  local process_revenue = process_revenue_summary(state)
   local process_losses = round_gold(process_loss_summary.total)
 
   local design_remaining = outstanding_design_capital(state)
@@ -442,6 +470,9 @@ function reports.overall(state, opts)
   totals.process_losses = process_losses
   totals.process_losses_attributed = round_gold(process_loss_summary.attributed_total)
   totals.process_losses_unattributed = round_gold(process_loss_summary.unattributed_total)
+  totals.process_revenue = process_revenue.has_revenue and round_gold(process_revenue.revenue) or nil
+  totals.process_total_cost = process_revenue.has_revenue and round_gold(process_revenue.total_cost) or nil
+  totals.process_net_result = process_revenue.has_revenue and round_gold(process_revenue.net_result) or nil
   totals.true_profit = round_gold(totals.true_profit) - process_losses
 
   return {
@@ -494,6 +525,7 @@ function reports.year(state, year, opts)
     end
   end
   local process_loss_summary = process_write_off_summary(state, year)
+  local process_revenue = process_revenue_summary(state, year)
   local process_losses = round_gold(process_loss_summary.total)
   local year_process_losses = round_gold(process_loss_summary.year_total)
   local design_remaining = outstanding_design_capital(state)
@@ -532,6 +564,9 @@ function reports.year(state, year, opts)
   end
 
   totals.process_losses = year_process_losses
+  totals.process_revenue = process_revenue.has_revenue and round_gold(process_revenue.revenue) or nil
+  totals.process_total_cost = process_revenue.has_revenue and round_gold(process_revenue.total_cost) or nil
+  totals.process_net_result = process_revenue.has_revenue and round_gold(process_revenue.net_result) or nil
   totals.true_profit = round_gold(totals.true_profit) - year_process_losses
 
   local note = nil
@@ -729,8 +764,11 @@ function reports.process(state, process_instance_id)
   for _, event in ipairs(get_events(state)) do
     local payload = event.payload or {}
     if payload.process_instance_id == process_instance_id then
-      if event.event_type == "PROCESS_START" then
+      if event.event_type == "PROCESS_START" or event.event_type == "PROCESS_APPLY" then
         merge_qty_map(committed_inputs, payload.inputs)
+        if event.event_type == "PROCESS_APPLY" then
+          merge_qty_map(outputs, payload.outputs)
+        end
       elseif event.event_type == "PROCESS_ADD_INPUTS" then
         merge_qty_map(committed_inputs, payload.inputs)
       elseif event.event_type == "PROCESS_COMPLETE" then
@@ -750,6 +788,7 @@ function reports.process(state, process_instance_id)
     process_instance_id = instance.process_instance_id,
     process_id = instance.process_id,
     status = instance.status,
+    passive = tonumber(instance.passive) == 1 and 1 or 0,
     started_at = instance.started_at,
     completed_at = instance.completed_at,
     note = instance.note,
@@ -757,8 +796,15 @@ function reports.process(state, process_instance_id)
     outputs = outputs,
     returned_inputs = returned_inputs,
     lost_inputs = lost_inputs,
+    revenue_gold = round_gold(instance.revenue_gold or 0),
     committed_cost_gold = round_gold(instance.committed_cost_total or 0),
+    direct_fee_gold = round_gold(instance.direct_fee_total or 0),
+    time_cost_gold = round_gold(instance.time_cost_total or 0),
+    elapsed_seconds = tonumber(instance.elapsed_seconds) or 0,
+    rate_gold_per_hour = tonumber(instance.rate_gold_per_hour) or 0,
     fees_gold = round_gold(instance.fees_total or 0),
+    total_process_cost_gold = round_gold((instance.committed_cost_total or 0) + (instance.fees_total or 0)),
+    net_result_gold = round_gold(instance.revenue_gold or 0) - round_gold((instance.committed_cost_total or 0) + (instance.fees_total or 0)),
     total_committed_gold = round_gold((instance.committed_cost_total or 0) + (instance.fees_total or 0)),
     output_unit_cost_gold = round_gold(instance.output_unit_cost or 0),
     write_off_total_gold = round_gold(write_off_total)

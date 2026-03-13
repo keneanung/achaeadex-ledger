@@ -7,6 +7,7 @@ describe("Deferred Processes", function()
   before_each(function()
     _G.AchaeadexLedger = nil
     dofile("src/scripts/core/inventory.lua")
+    dofile("src/scripts/core/costing.lua")
     dofile("src/scripts/core/deferred_processes.lua")
 
     inventory = _G.AchaeadexLedger.Core.Inventory
@@ -72,6 +73,7 @@ describe("Deferred Process Write-Offs", function()
     dofile("src/scripts/core/pattern_pools.lua")
     dofile("src/scripts/core/production_sources.lua")
     dofile("src/scripts/core/recovery.lua")
+    dofile("src/scripts/core/costing.lua")
     dofile("src/scripts/core/ledger.lua")
     dofile("src/scripts/core/reports.lua")
     dofile("src/scripts/core/storage/memory_event_store.lua")
@@ -176,6 +178,7 @@ describe("Deferred Process UX Defaults", function()
     dofile("src/scripts/core/pattern_pools.lua")
     dofile("src/scripts/core/production_sources.lua")
     dofile("src/scripts/core/recovery.lua")
+    dofile("src/scripts/core/costing.lua")
     dofile("src/scripts/core/ledger.lua")
     dofile("src/scripts/core/storage/memory_event_store.lua")
 

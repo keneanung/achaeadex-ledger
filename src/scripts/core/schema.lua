@@ -372,6 +372,23 @@ schema.migrations = {
   [13] = [[
     ALTER TABLE production_sources ADD COLUMN metadata_json TEXT;
     CREATE INDEX IF NOT EXISTS idx_production_sources_metadata_json ON production_sources(metadata_json);
+  ]],
+  [14] = [[
+    ALTER TABLE process_instances ADD COLUMN passive INTEGER NOT NULL DEFAULT 0;
+
+    CREATE TABLE IF NOT EXISTS process_time_costs (
+      process_instance_id TEXT NOT NULL,
+      at TEXT NOT NULL,
+      amount_gold INTEGER NOT NULL,
+      elapsed_seconds INTEGER NOT NULL,
+      rate_gold_per_hour INTEGER NOT NULL,
+      reason TEXT,
+      source_event_id INTEGER,
+      PRIMARY KEY (process_instance_id, at)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_process_time_costs_process ON process_time_costs(process_instance_id);
+    CREATE INDEX IF NOT EXISTS idx_process_time_costs_source_event_id ON process_time_costs(source_event_id);
   ]]
 }
 

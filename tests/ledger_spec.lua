@@ -13,6 +13,7 @@ describe("Ledger Core", function()
     dofile("src/scripts/core/pattern_pools.lua")
     dofile("src/scripts/core/production_sources.lua")
     dofile("src/scripts/core/recovery.lua")
+    dofile("src/scripts/core/costing.lua")
     dofile("src/scripts/core/ledger.lua")
     dofile("src/scripts/core/storage/memory_event_store.lua")
     
@@ -207,6 +208,43 @@ describe("Ledger Core", function()
       
       assert.are.equal(3, inventory.get_qty(state.inventory, "metal"))
       assert.is.near(expected_unit_cost, actual_unit_cost, 0.01)
+    end)
+
+    it("should allow immediate processes without inputs", function()
+      local store = memory_store.new()
+      local state = ledger.new(store)
+
+      ledger.apply_process(state, "manifest",
+        {},
+        { token = 2 },
+        30)
+
+      assert.are.equal(2, inventory.get_qty(state.inventory, "token"))
+      assert.are.equal(15, inventory.get_unit_cost(state.inventory, "token"))
+
+      local event = store.events[1]
+      assert.are.equal("PROCESS_APPLY", event.event_type)
+      assert.are.same({}, event.payload.inputs)
+      assert.are.same({ token = 2 }, event.payload.outputs)
+      assert.are.equal(30, event.payload.gold_fee)
+    end)
+
+    it("should treat gold outputs as inventory commodities unless revenue is explicit", function()
+      local store = memory_store.new()
+      local state = ledger.new(store)
+
+      ledger.apply_opening_inventory(state, "ore", 2, 10)
+      ledger.apply_process(state, "mint", { ore = 1 }, { gold = 2 }, 0)
+
+      assert.are.equal(2, inventory.get_qty(state.inventory, "gold"))
+      assert.are.equal(5, inventory.get_unit_cost(state.inventory, "gold"))
+
+      local process_instance
+      for _, instance in pairs(state.process_instances) do
+        process_instance = instance
+      end
+      assert.is_not_nil(process_instance)
+      assert.are.equal(0, process_instance.revenue_gold)
     end)
   end)
   

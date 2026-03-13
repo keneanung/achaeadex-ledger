@@ -5,6 +5,7 @@ describe("Reports", function()
   local reports
   local memory_store
   local json
+  local inventory
 
   before_each(function()
     _G.AchaeadexLedger = nil
@@ -14,6 +15,7 @@ describe("Reports", function()
     dofile("src/scripts/core/production_sources.lua")
     dofile("src/scripts/core/recovery.lua")
     dofile("src/scripts/core/json.lua")
+    dofile("src/scripts/core/costing.lua")
     dofile("src/scripts/core/ledger.lua")
     dofile("src/scripts/core/reports.lua")
     dofile("src/scripts/core/storage/memory_event_store.lua")
@@ -22,6 +24,7 @@ describe("Reports", function()
     reports = _G.AchaeadexLedger.Core.Reports
     memory_store = _G.AchaeadexLedger.Core.MemoryEventStore
     json = _G.AchaeadexLedger.Core.Json
+    inventory = _G.AchaeadexLedger.Core.Inventory
   end)
 
   local function craft_and_sell(state, item_id, sale_id, sale_price, game_time)
@@ -317,5 +320,78 @@ describe("Reports", function()
     assert.are.equal(10, report.fees_gold)
     assert.are.equal(70, report.total_committed_gold)
     assert.are.equal(30, report.write_off_total_gold)
+  end)
+
+  it("deferred process with explicit revenue reports revenue, total cost, and net result without affecting inventory", function()
+    local store = memory_store.new()
+    local state = ledger.new(store)
+
+    ledger.apply_opening_inventory(state, "curatives", 10, 15)
+    ledger.apply_process_start(state, "P-HUNT", "hunting", { curatives = 2 }, 50, nil, { year = 700 })
+    ledger.apply_process_add_inputs(state, "P-HUNT", { curatives = 1 })
+    ledger.apply_process_complete(state, "P-HUNT", {}, nil, { year = 700 }, {
+      revenue_gold = 500
+    })
+
+    local process_report = reports.process(state, "P-HUNT")
+    assert.are.equal(500, process_report.revenue_gold)
+    assert.are.equal(45, process_report.committed_cost_gold)
+    assert.are.equal(50, process_report.fees_gold)
+    assert.are.equal(95, process_report.total_process_cost_gold)
+    assert.are.equal(405, process_report.net_result_gold)
+    assert.are.same({}, process_report.outputs)
+    assert.are.equal(0, inventory.get_qty(state.inventory, "gold"))
+
+    local year_report = reports.year(state, 700)
+    assert.are.equal(500, year_report.totals.process_revenue)
+    assert.are.equal(95, year_report.totals.process_total_cost)
+    assert.are.equal(405, year_report.totals.process_net_result)
+  end)
+
+  it("immediate process with explicit revenue reports revenue and leaves WAC inventory unchanged", function()
+    local store = memory_store.new()
+    local state = ledger.new(store)
+
+    ledger.apply_opening_inventory(state, "curatives", 10, 20)
+    ledger.apply_process(state, "hunting", { curatives = 1 }, {}, 25, { year = 701 }, {
+      revenue_gold = 125
+    })
+
+    local process_id = nil
+    for instance_id, instance in pairs(state.process_instances or {}) do
+      if instance.process_id == "hunting" then
+        process_id = instance_id
+        break
+      end
+    end
+
+    assert.is_not_nil(process_id)
+    assert.are.equal(0, inventory.get_qty(state.inventory, "gold"))
+    assert.are.equal(20, inventory.get_unit_cost(state.inventory, "curatives"))
+
+    local process_report = reports.process(state, process_id)
+    assert.are.equal(125, process_report.revenue_gold)
+    assert.are.equal(20, process_report.committed_cost_gold)
+    assert.are.equal(45, process_report.total_process_cost_gold)
+    assert.are.equal(80, process_report.net_result_gold)
+
+    local overall = reports.overall(state)
+    assert.are.equal(125, overall.totals.process_revenue)
+    assert.are.equal(45, overall.totals.process_total_cost)
+    assert.are.equal(80, overall.totals.process_net_result)
+  end)
+
+  it("gold in process outputs is treated as a commodity when explicitly output", function()
+    local store = memory_store.new()
+    local state = ledger.new(store)
+
+    ledger.apply_opening_inventory(state, "ore", 5, 10)
+    ledger.apply_process(state, "mint", { ore = 1 }, { gold = 2 }, 0, { year = 702 })
+
+    assert.are.equal(2, inventory.get_qty(state.inventory, "gold"))
+    assert.are.equal(5, inventory.get_unit_cost(state.inventory, "gold"))
+
+    local overall = reports.overall(state)
+    assert.is_nil(overall.totals.process_revenue)
   end)
 end)

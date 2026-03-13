@@ -66,6 +66,16 @@ local function get_json()
   return _G.AchaeadexLedger.Core.Json
 end
 
+local function get_costing()
+  if not _G.AchaeadexLedger
+    or not _G.AchaeadexLedger.Core
+    or not _G.AchaeadexLedger.Core.Costing then
+    error("AchaeadexLedger.Core.Costing is not loaded")
+  end
+
+  return _G.AchaeadexLedger.Core.Costing
+end
+
 local function require_event_store(state)
   if not state.event_store then
     error("EventStore is required on ledger state")
@@ -140,6 +150,66 @@ local function encode_breakdown(breakdown)
     end
   end
   return "{}"
+end
+
+local function default_process_passive(state, started_at)
+  local cutover = state.process_time_cost_enabled_from_ts
+  if not cutover or type(started_at) ~= "string" then
+    return 1
+  end
+  if started_at < cutover then
+    return 1
+  end
+  return 0
+end
+
+local function resolve_process_passive(state, passive, started_at)
+  if passive == nil then
+    return default_process_passive(state, started_at)
+  end
+
+  local normalized = tonumber(passive)
+  if normalized ~= 0 and normalized ~= 1 then
+    error("passive must be 0 or 1")
+  end
+  return normalized
+end
+
+local function resolve_process_time_rate(state, explicit_rate)
+  if explicit_rate ~= nil then
+    return tonumber(explicit_rate) or 0
+  end
+  return tonumber(state.process_time_cost_gold_per_hour) or 0
+end
+
+local function compute_deferred_elapsed_seconds(started_at, completed_at)
+  local costing = get_costing()
+  local elapsed = costing.elapsed_seconds(started_at, completed_at)
+  if elapsed == nil or elapsed <= 0 then
+    return 0
+  end
+  return elapsed
+end
+
+local function build_process_time_cost(state, process_instance, completed_at)
+  local passive = process_instance and tonumber(process_instance.passive) or 1
+  if passive == 1 then
+    return nil
+  end
+
+  local elapsed_seconds = compute_deferred_elapsed_seconds(process_instance.started_at, completed_at)
+  if elapsed_seconds <= 0 then
+    return nil
+  end
+
+  local costing = get_costing()
+  local rate_gold_per_hour = resolve_process_time_rate(state)
+  local computed = costing.compute_time_cost(elapsed_seconds, rate_gold_per_hour)
+  if computed.amount_gold <= 0 then
+    return nil
+  end
+
+  return computed
 end
 
 local function normalize_game_year(game_time)
@@ -224,6 +294,22 @@ local function recompute_process_write_off_years(state)
   end
 end
 
+local function recompute_process_activity_years(state)
+  for _, instance in pairs(state.process_instances or {}) do
+    local revenue_gold = tonumber(instance.revenue_gold) or 0
+    if revenue_gold > 0 and instance._revenue_event_id then
+      instance.revenue_resolved_game_year = resolve_event_game_year(state, { id = instance._revenue_event_id }, {
+        game_time = instance.revenue_game_time
+      }, {
+        process_instance_id = instance.process_instance_id,
+        process_scope = instance.revenue_scope or "complete"
+      })
+    else
+      instance.revenue_resolved_game_year = nil
+    end
+  end
+end
+
 local function recompute_external_item_years(state)
   for _, item in pairs(state.external_items or {}) do
     item.acquired_resolved_game_year = resolve_event_game_year(state, { id = item._event_id }, { game_time = item.game_time })
@@ -239,8 +325,17 @@ end
 local function recompute_all_resolved_years(state)
   recompute_sale_years(state)
   recompute_process_write_off_years(state)
+  recompute_process_activity_years(state)
   recompute_external_item_years(state)
   recompute_order_settlement_years(state)
+end
+
+local function total_process_output_qty(outputs)
+  local total = 0
+  for _, qty in pairs(outputs or {}) do
+    total = total + (tonumber(qty) or 0)
+  end
+  return total
 end
 
 local function item_base_cost(item)
@@ -249,6 +344,22 @@ local function item_base_cost(item)
   end
   return (item.operational_cost_gold or 0) - (item.forge_allocated_coal_gold or 0)
 end
+
+local function compute_material_breakdown(state, materials)
+  local inventory = get_inventory()
+  local costing = get_costing()
+
+  return costing.compute_materials_breakdown(materials, {
+    get_unit_cost = function(commodity)
+      return inventory.get_unit_cost(state.inventory, commodity)
+    end,
+    get_available_qty = function(commodity)
+      return inventory.get_qty(state.inventory, commodity)
+    end
+  })
+end
+
+local compute_material_cost
 
 -- Create a new ledger instance
 function ledger.new(event_store)
@@ -278,6 +389,9 @@ function ledger.new(event_store)
     order_settlements = {}, -- settlement_id -> settlement data
     process_write_offs = {}, -- list of write-off entries
     process_game_time_overrides = {}, -- process_instance_id -> { scope -> { game_time, updated_at, note } }
+    process_time_cost_gold_per_hour = 0,
+    process_time_cost_enabled_from_ts = nil,
+    generated_process_counter = 0,
     ledger_game_year_defaults = {}, -- ordered rows: { effective_from_event_id, default_year, set_at, note }
     forge_sessions = {}, -- forge_session_id -> session data
     forge_session_items = {}, -- forge_session_id -> { item_id -> allocated_coal_gold }
@@ -360,7 +474,15 @@ function ledger.apply_event(state, event)
     local inventory = get_inventory()
     local inputs = payload.inputs or {}
     local outputs = payload.outputs or {}
+    local total_output_qty = total_process_output_qty(outputs)
     local gold_fee = payload.gold_fee or 0
+    local time_cost_gold = payload.time_cost_gold or 0
+    local revenue_gold = tonumber(payload.revenue_gold) or 0
+    local process_instance_id = payload.process_instance_id or (event.id and ("XP-" .. tostring(event.id)) or nil)
+    local passive = payload.passive
+    if passive == nil then
+      passive = default_process_passive(state, payload.started_at or event.ts)
+    end
 
     local total_input_cost = 0
     for commodity, qty in pairs(inputs) do
@@ -368,12 +490,7 @@ function ledger.apply_event(state, event)
       total_input_cost = total_input_cost + cost
     end
 
-    local total_cost = total_input_cost + gold_fee
-    local total_output_qty = 0
-    for _, qty in pairs(outputs) do
-      total_output_qty = total_output_qty + qty
-    end
-
+    local total_cost = total_input_cost + gold_fee + time_cost_gold
     local output_unit_cost = 0
     if total_output_qty > 0 then
       output_unit_cost = total_cost / total_output_qty
@@ -382,21 +499,76 @@ function ledger.apply_event(state, event)
     for commodity, qty in pairs(outputs) do
       inventory.add(state.inventory, commodity, qty, output_unit_cost)
     end
+
+    if process_instance_id then
+      state.process_instances[process_instance_id] = {
+        process_instance_id = process_instance_id,
+        process_id = payload.process_id,
+        started_at = payload.started_at or event.ts,
+        completed_at = payload.completed_at or event.ts,
+        status = "completed",
+        passive = tonumber(passive) == 1 and 1 or 0,
+        note = payload.note,
+        committed_entries = {},
+        committed_cost_total = total_input_cost,
+        direct_fee_total = gold_fee,
+        time_cost_total = 0,
+        fees_total = gold_fee,
+        elapsed_seconds = 0,
+        rate_gold_per_hour = 0,
+        outputs = outputs,
+        output_unit_cost = output_unit_cost,
+        cost_breakdown = decode_breakdown(payload.cost_breakdown_json),
+        revenue_gold = revenue_gold,
+        revenue_game_time = payload.game_time,
+        revenue_scope = "complete",
+        revenue_resolved_game_year = resolve_event_game_year(state, event, payload, {
+          process_instance_id = process_instance_id,
+          process_scope = "complete"
+        }),
+        _revenue_event_id = event.id
+      }
+    end
   elseif event_type == "PROCESS_START" then
     local deferred = get_deferred()
-    return deferred.start(state, payload.process_instance_id, payload.process_id, payload.inputs, payload.gold_fee, payload.note, payload.started_at)
+    local passive = payload.passive
+    if passive == nil then
+      passive = default_process_passive(state, payload.started_at or event.ts)
+    end
+    return deferred.start(state, payload.process_instance_id, payload.process_id, payload.inputs, payload.gold_fee, payload.note, payload.started_at, passive)
   elseif event_type == "PROCESS_ADD_INPUTS" then
     local deferred = get_deferred()
     return deferred.add_inputs(state, payload.process_instance_id, payload.inputs, payload.note)
   elseif event_type == "PROCESS_ADD_FEE" then
     local deferred = get_deferred()
     return deferred.add_fee(state, payload.process_instance_id, payload.gold_fee, payload.note)
+  elseif event_type == "PROCESS_ADD_TIME_COST" then
+    local deferred = get_deferred()
+    return deferred.add_time_cost(state, payload.process_instance_id, payload.amount_gold, payload.elapsed_seconds, payload.rate_gold_per_hour, payload.note)
   elseif event_type == "PROCESS_COMPLETE" then
     local deferred = get_deferred()
-    return deferred.complete(state, payload.process_instance_id, payload.outputs, payload.note, payload.completed_at)
+    local instance = deferred.complete(state, payload.process_instance_id, payload.outputs, payload.note, payload.completed_at)
+    instance.revenue_gold = tonumber(payload.revenue_gold) or 0
+    instance.revenue_game_time = payload.game_time
+    instance.revenue_scope = "complete"
+    instance.revenue_resolved_game_year = resolve_event_game_year(state, event, payload, {
+      process_instance_id = payload.process_instance_id,
+      process_scope = "complete"
+    })
+    instance._revenue_event_id = event.id
+    return instance
   elseif event_type == "PROCESS_ABORT" then
     local deferred = get_deferred()
-    return deferred.abort(state, payload.process_instance_id, payload.disposition, payload.note, payload.completed_at)
+    local instance = deferred.abort(state, payload.process_instance_id, payload.disposition, payload.note, payload.completed_at)
+    instance.revenue_gold = tonumber(payload.revenue_gold) or 0
+    instance.revenue_game_time = payload.game_time
+    instance.revenue_scope = "abort"
+    instance.revenue_resolved_game_year = resolve_event_game_year(state, event, payload, {
+      process_instance_id = payload.process_instance_id,
+      process_scope = "abort"
+    })
+    instance._revenue_event_id = event.id
+    return instance
   elseif event_type == "PROCESS_WRITE_OFF" then
     local resolved_game_year = resolve_event_game_year(state, event, payload, {
       process_instance_id = payload.process_instance_id,
@@ -424,6 +596,7 @@ function ledger.apply_event(state, event)
       note = payload.note
     }
     recompute_process_write_off_years(state)
+    recompute_process_activity_years(state)
     return state
   elseif event_type == "FORGE_WRITE_OFF" then
     local resolved_game_year = resolve_event_game_year(state, event, payload)
@@ -584,6 +757,10 @@ function ledger.apply_event(state, event)
       return tonumber(a.effective_from_event_id) < tonumber(b.effective_from_event_id)
     end)
     recompute_all_resolved_years(state)
+  elseif event_type == "PROCESS_SET_TIME_COST_RATE" then
+    state.process_time_cost_gold_per_hour = tonumber(payload.rate_gold_per_hour) or 0
+  elseif event_type == "PROCESS_SET_TIME_COST_CUTOVER" then
+    state.process_time_cost_enabled_from_ts = payload.enabled_from_ts
   elseif event_type == "ORDER_CLOSE" then
     local order = state.orders[payload.order_id]
     if not order then
@@ -786,10 +963,13 @@ function ledger.apply_event(state, event)
         allocated_sum = allocated_sum + alloc
         item.forge_allocated_coal_gold = (item.forge_allocated_coal_gold or 0) + alloc
         item.operational_cost_gold = (item.operational_cost_gold or 0) + alloc
-        local breakdown = decode_breakdown(item.cost_breakdown_json)
+        local costing = get_costing()
+        local breakdown = costing.standardize_breakdown(decode_breakdown(item.cost_breakdown_json))
         breakdown.base_operational_cost_gold = item_base_cost(item)
+        breakdown.allocated_session_cost_gold = (breakdown.allocated_session_cost_gold or 0) + alloc
         breakdown.forge_coal_allocated_gold = item.forge_allocated_coal_gold
         breakdown.forge_session_id = payload.forge_session_id
+        breakdown = costing.standardize_breakdown(breakdown)
         item.cost_breakdown_json = encode_breakdown(breakdown)
         if item.pending_forge_session_id == payload.forge_session_id then
           item.pending_forge_session_id = nil
@@ -926,18 +1106,120 @@ function ledger.apply_broker_sell(state, commodity, qty, unit_price, opts)
 end
 
 -- Process immediate PROCESS_APPLY event
-function ledger.apply_process(state, process_id, inputs, outputs, gold_fee, game_time)
-  local event = ledger.record_event(state, "PROCESS_APPLY", {
-    process_id = process_id,
+function ledger.apply_process(state, process_id, inputs, outputs, gold_fee, game_time, opts)
+  opts = opts or {}
+
+  local completed_at = opts.completed_at or os.date("!%Y-%m-%dT%H:%M:%SZ")
+  local elapsed_seconds = tonumber(opts.elapsed_seconds)
+  if elapsed_seconds == nil and opts.time_hours ~= nil then
+    elapsed_seconds = math.floor((tonumber(opts.time_hours) or 0) * 3600)
+  end
+  elapsed_seconds = elapsed_seconds or 0
+  if elapsed_seconds < 0 then
+    error("elapsed time must be non-negative")
+  end
+
+  local costing = get_costing()
+  local started_at = opts.started_at or costing.shift_iso8601_seconds(completed_at, -elapsed_seconds) or completed_at
+  local passive = resolve_process_passive(state, opts.passive, started_at)
+  local rate_gold_per_hour = resolve_process_time_rate(state, opts.rate_gold_per_hour)
+  local time_cost = 0
+  if passive == 0 and elapsed_seconds > 0 then
+    time_cost = costing.compute_time_cost(elapsed_seconds, rate_gold_per_hour).amount_gold
+  end
+
+  local materials_cost = compute_material_cost(state, inputs or {})
+  local process_instance_id = opts.process_instance_id
+  local revenue_gold = tonumber(opts.revenue_gold) or 0
+  if not process_instance_id then
+    state.generated_process_counter = (state.generated_process_counter or 0) + 1
+    process_instance_id = string.format("XP-%s-%04d", os.date("!%Y%m%d"), state.generated_process_counter)
+  end
+
+  local breakdown = costing.compute_process_cost_breakdown({
+    materials_cost_gold = materials_cost,
+    direct_fee_gold = gold_fee or 0,
+    time_cost_gold = time_cost,
+    elapsed_seconds = elapsed_seconds,
+    rate_gold_per_hour = rate_gold_per_hour,
     inputs = inputs,
     outputs = outputs,
-    gold_fee = gold_fee or 0,
-    game_time = game_time
+    passive = passive == 1
   })
 
-  ledger.apply_event(state, event)
+  local events = {
+    {
+      event_type = "PROCESS_APPLY",
+      payload = {
+        process_instance_id = process_instance_id,
+        process_id = process_id,
+        inputs = inputs,
+        outputs = outputs,
+        revenue_gold = revenue_gold,
+        gold_fee = gold_fee or 0,
+        time_cost_gold = time_cost,
+        elapsed_seconds = elapsed_seconds,
+        rate_gold_per_hour = rate_gold_per_hour,
+        passive = passive,
+        started_at = started_at,
+        completed_at = completed_at,
+        note = opts.note,
+        cost_breakdown_json = encode_breakdown(breakdown),
+        game_time = game_time
+      }
+    }
+  }
+
+  if passive == 0 and elapsed_seconds > 0 and time_cost > 0 then
+    table.insert(events, {
+      event_type = "PROCESS_ADD_TIME_COST",
+      payload = {
+        process_instance_id = process_instance_id,
+        amount_gold = time_cost,
+        elapsed_seconds = elapsed_seconds,
+        rate_gold_per_hour = rate_gold_per_hour,
+        reason = "auto_elapsed_time",
+        game_time = game_time
+      }
+    })
+  end
+
+  ledger.record_events(state, events)
+  for _, event in ipairs(events) do
+    ledger.apply_event(state, event)
+  end
 
   return state
+end
+
+function ledger.apply_process_time_cost_rate(state, rate_gold_per_hour)
+  local rate = tonumber(rate_gold_per_hour)
+  if rate == nil or rate < 0 then
+    error("rate_gold_per_hour must be a non-negative number")
+  end
+
+  local event = ledger.record_event(state, "PROCESS_SET_TIME_COST_RATE", {
+    rate_gold_per_hour = math.floor(rate)
+  })
+
+  return ledger.apply_event(state, event)
+end
+
+function ledger.apply_process_time_cost_cutover(state, enabled_from_ts)
+  if type(enabled_from_ts) ~= "string" then
+    error("enabled_from_ts must be an ISO-8601 UTC timestamp")
+  end
+
+  local costing = get_costing()
+  if not costing.iso8601_to_epoch_seconds(enabled_from_ts) then
+    error("enabled_from_ts must be an ISO-8601 UTC timestamp")
+  end
+
+  local event = ledger.record_event(state, "PROCESS_SET_TIME_COST_CUTOVER", {
+    enabled_from_ts = enabled_from_ts
+  })
+
+  return ledger.apply_event(state, event)
 end
 
 -- Process DESIGN_COST event
@@ -1187,33 +1469,18 @@ local function ensure_source_or_stub(state, source_id, source_kind, source_type)
   return ensure_design_or_stub(state, source_id)
 end
 
-local function compute_material_cost(state, materials)
-  local inventory = get_inventory()
-  local total = 0
-  for commodity, qty in pairs(materials) do
-    if qty <= 0 then
-      error("Material quantity must be positive for " .. commodity)
-    end
-    local available = inventory.get_qty(state.inventory, commodity)
-    if available < qty then
-      error("Insufficient " .. commodity .. ": have " .. tostring(available) .. ", need " .. tostring(qty))
-    end
-    local unit_cost = inventory.get_unit_cost(state.inventory, commodity)
-    total = total + (unit_cost * qty)
-  end
-  return total
+compute_material_cost = function(state, materials)
+  return compute_material_breakdown(state, materials).materials_cost_gold
 end
 
-function ledger.apply_craft_item_auto(state, item_id, design_id, opts)
+local function build_craft_cost_context(state, source, opts)
   opts = opts or {}
+
   local materials = opts.materials
-  local appearance_key = opts.appearance_key
   local manual_cost = opts.manual_cost
+  local allow_estimated = opts.allow_estimated == true
   local time_cost_gold = opts.time_cost_gold or 0
   local time_hours = opts.time_hours or 0
-
-  local resolved_design_id = ensure_design_or_stub(state, design_id, materials)
-  local source = resolved_design_id and state.production_sources[resolved_design_id] or nil
 
   local materials_source = nil
   local materials_cost = 0
@@ -1222,44 +1489,63 @@ function ledger.apply_craft_item_auto(state, item_id, design_id, opts)
   if materials and next(materials) ~= nil then
     materials_source = "explicit"
     materials_payload = materials
-    materials_cost = compute_material_cost(state, materials)
+    materials_cost = compute_material_breakdown(state, materials).materials_cost_gold
   elseif source and source.bom and next(source.bom) ~= nil then
     materials_source = "design_bom"
     materials_payload = source.bom
-    materials_cost = compute_material_cost(state, source.bom)
+    materials_cost = compute_material_breakdown(state, source.bom).materials_cost_gold
   elseif manual_cost ~= nil then
     materials_source = "manual"
     materials_cost = manual_cost
+  elseif allow_estimated then
+    materials_source = "estimated"
+    materials_cost = 0
   else
-    error("No materials provided and no design BOM available")
+    error("No materials provided and no source BOM available")
   end
 
   local per_item_fee = source and (source.per_item_fee_gold or 0) or 0
-  local operational_cost_gold = materials_cost + per_item_fee + time_cost_gold
-
-  local breakdown = {
+  local costing = get_costing()
+  local breakdown = costing.compute_craft_cost_breakdown({
     materials_cost_gold = materials_cost,
     materials_source = materials_source,
     materials = materials_payload,
-    per_item_fee = per_item_fee,
+    per_item_fee_gold = per_item_fee,
     time_hours = time_hours,
     time_cost_gold = time_cost_gold,
-    base_operational_cost_gold = operational_cost_gold,
-    forge_coal_allocated_gold = 0
-  }
+    allocated_session_cost_gold = 0,
+    carried_basis_gold = 0
+  })
 
-  local breakdown_json = encode_breakdown(breakdown)
+  return {
+    materials_source = materials_source,
+    materials_payload = materials_payload,
+    materials_cost_gold = materials_cost,
+    breakdown = breakdown,
+    operational_cost_gold = breakdown.total_operational_cost_gold
+  }
+end
+
+function ledger.apply_craft_item_auto(state, item_id, design_id, opts)
+  opts = opts or {}
+  local materials = opts.materials
+  local appearance_key = opts.appearance_key
+
+  local resolved_design_id = ensure_design_or_stub(state, design_id, materials)
+  local source = resolved_design_id and state.production_sources[resolved_design_id] or nil
+  local cost_context = build_craft_cost_context(state, source, opts)
+  local breakdown_json = encode_breakdown(cost_context.breakdown)
 
   return ledger.apply_craft_item(
     state,
     item_id,
     resolved_design_id,
-    operational_cost_gold,
+    cost_context.operational_cost_gold,
     breakdown_json,
     appearance_key,
-    materials_payload,
-    materials_source,
-    materials_cost,
+    cost_context.materials_payload,
+    cost_context.materials_source,
+    cost_context.materials_cost_gold,
     opts.game_time
   )
 end
@@ -1311,61 +1597,23 @@ function ledger.apply_source_craft_auto(state, item_id, source_id, source_kind, 
   opts = opts or {}
   local resolved_source_id = ensure_source_or_stub(state, source_id, source_kind, opts.source_type)
   local source = state.production_sources[resolved_source_id]
-
-  local materials = opts.materials
   local appearance_key = opts.appearance_key
-  local manual_cost = opts.manual_cost
-  local time_cost_gold = opts.time_cost_gold or 0
-  local time_hours = opts.time_hours or 0
-  local materials_source = nil
-  local materials_cost = 0
-  local materials_payload = nil
-
-  if materials and next(materials) ~= nil then
-    materials_source = "explicit"
-    materials_payload = materials
-    materials_cost = compute_material_cost(state, materials)
-  elseif source and source.bom and next(source.bom) ~= nil then
-    materials_source = "design_bom"
-    materials_payload = source.bom
-    materials_cost = compute_material_cost(state, source.bom)
-  elseif manual_cost ~= nil then
-    materials_source = "manual"
-    materials_cost = manual_cost
-  elseif opts.allow_estimated then
-    materials_source = "estimated"
-    materials_cost = 0
-  else
-    error("No materials provided and no source BOM available")
-  end
-
-  local per_item_fee = source and (source.per_item_fee_gold or 0) or 0
-  local operational_cost_gold = materials_cost + per_item_fee + time_cost_gold
-  local breakdown = {
-    materials_cost_gold = materials_cost,
-    materials_source = materials_source,
-    materials = materials_payload,
-    per_item_fee = per_item_fee,
-    time_hours = time_hours,
-    time_cost_gold = time_cost_gold,
-    base_operational_cost_gold = operational_cost_gold,
-    forge_coal_allocated_gold = 0
-  }
+  local cost_context = build_craft_cost_context(state, source, opts)
 
   local event = ledger.record_event(state, "CRAFT_ITEM", {
     item_id = item_id,
     source_id = resolved_source_id,
     source_kind = source_kind,
-    operational_cost_gold = operational_cost_gold,
-    base_operational_cost_gold = operational_cost_gold,
+    operational_cost_gold = cost_context.operational_cost_gold,
+    base_operational_cost_gold = cost_context.operational_cost_gold,
     forge_allocated_coal_gold = 0,
-    cost_breakdown_json = encode_breakdown(breakdown),
+    cost_breakdown_json = encode_breakdown(cost_context.breakdown),
     appearance_key = appearance_key,
     crafted_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
     game_time = opts.game_time,
-    materials = materials_payload,
-    materials_source = materials_source,
-    materials_cost_gold = materials_cost
+    materials = cost_context.materials_payload,
+    materials_source = cost_context.materials_source,
+    materials_cost_gold = cost_context.materials_cost_gold
   })
 
   ledger.apply_event(state, event)
@@ -1487,10 +1735,13 @@ function ledger.apply_forge_finalize(state, forge_session_id, status, method, no
         allocations[row.item_id] = alloc
         computed_over[row.item_id] = row.cost
         local item = state.crafted_items[row.item_id]
-        local breakdown = decode_breakdown(item and item.cost_breakdown_json or "{}")
+        local costing = get_costing()
+        local breakdown = costing.standardize_breakdown(decode_breakdown(item and item.cost_breakdown_json or "{}"))
         breakdown.base_operational_cost_gold = row.cost
+        breakdown.allocated_session_cost_gold = (breakdown.allocated_session_cost_gold or 0) + alloc
         breakdown.forge_coal_allocated_gold = (item and item.forge_allocated_coal_gold or 0) + alloc
         breakdown.forge_session_id = forge_session_id
+        breakdown = costing.standardize_breakdown(breakdown)
         item_breakdowns[row.item_id] = encode_breakdown(breakdown)
         allocated_sum = allocated_sum + alloc
       end
@@ -1505,10 +1756,13 @@ function ledger.apply_forge_finalize(state, forge_session_id, status, method, no
         allocations[row.item_id] = alloc
         computed_over[row.item_id] = row.cost
         local item = state.crafted_items[row.item_id]
-        local breakdown = decode_breakdown(item and item.cost_breakdown_json or "{}")
+        local costing = get_costing()
+        local breakdown = costing.standardize_breakdown(decode_breakdown(item and item.cost_breakdown_json or "{}"))
         breakdown.base_operational_cost_gold = row.cost
+        breakdown.allocated_session_cost_gold = (breakdown.allocated_session_cost_gold or 0) + alloc
         breakdown.forge_coal_allocated_gold = (item and item.forge_allocated_coal_gold or 0) + alloc
         breakdown.forge_session_id = forge_session_id
+        breakdown = costing.standardize_breakdown(breakdown)
         item_breakdowns[row.item_id] = encode_breakdown(breakdown)
         allocated_sum = allocated_sum + alloc
       end
@@ -1571,7 +1825,7 @@ function ledger.apply_augment_item(state, new_item_id, source_id, target_item_id
 
   local materials_cost = 0
   if next(materials) ~= nil then
-    materials_cost = compute_material_cost(state, materials)
+    materials_cost = compute_material_breakdown(state, materials).materials_cost_gold
   end
   local fee = opts.fee_gold or 0
   local time_cost = opts.time_cost_gold or 0
@@ -1584,19 +1838,18 @@ function ledger.apply_augment_item(state, new_item_id, source_id, target_item_id
     parent_basis = target_external.basis_gold or 0
     target_item_kind = "external"
   end
-  local operational_cost = parent_basis + materials_cost + fee + time_cost
-
-  local breakdown = {
+  local costing = get_costing()
+  local breakdown = costing.compute_craft_cost_breakdown({
     transform_kind = "augmentation",
     parent_item_id = target_item_id,
-    parent_basis_gold = parent_basis,
+    carried_basis_gold = parent_basis,
     materials = materials,
     materials_cost_gold = materials_cost,
-    fee_gold = fee,
+    direct_fee_gold = fee,
     time_cost_gold = time_cost,
-    base_operational_cost_gold = operational_cost,
-    forge_coal_allocated_gold = 0
-  }
+    allocated_session_cost_gold = 0
+  })
+  local operational_cost = breakdown.total_operational_cost_gold
 
   local event = ledger.record_event(state, "AUGMENT_ITEM", {
     new_item_id = new_item_id,
@@ -1812,11 +2065,6 @@ function ledger.apply_order_settle(state, settlement_id, order_id, amount_gold, 
     if not item then
       error("Item " .. item_id .. " not found")
     end
-    for _, sale in pairs(state.sales) do
-      if sale.item_id == item_id then
-        error("Item " .. item_id .. " already sold")
-      end
-    end
     table.insert(cost_items, { item_id = item_id, cost = item.operational_cost_gold or 0 })
   end
 
@@ -1987,8 +2235,10 @@ function ledger.report_item(state, item_id)
   return report
 end
 
-function ledger.apply_process_start(state, process_instance_id, process_id, inputs, gold_fee, note, game_time)
-  local started_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+function ledger.apply_process_start(state, process_instance_id, process_id, inputs, gold_fee, note, game_time, opts)
+  opts = opts or {}
+  local started_at = opts.started_at or os.date("!%Y-%m-%dT%H:%M:%SZ")
+  local passive = resolve_process_passive(state, opts.passive, started_at)
   local event = ledger.record_event(state, "PROCESS_START", {
     process_instance_id = process_instance_id,
     process_id = process_id,
@@ -1996,6 +2246,7 @@ function ledger.apply_process_start(state, process_instance_id, process_id, inpu
     gold_fee = gold_fee or 0,
     note = note,
     started_at = started_at,
+    passive = passive,
     game_time = game_time
   })
 
@@ -2024,7 +2275,9 @@ function ledger.apply_process_add_fee(state, process_instance_id, gold_fee, note
   return ledger.apply_event(state, event)
 end
 
-function ledger.apply_process_complete(state, process_instance_id, outputs, note, game_time)
+function ledger.apply_process_complete(state, process_instance_id, outputs, note, game_time, opts)
+  opts = opts or {}
+  local revenue_gold = tonumber(opts.revenue_gold) or 0
   local instance = state.process_instances and state.process_instances[process_instance_id]
   if not instance then
     error("Process instance not found: " .. process_instance_id)
@@ -2036,7 +2289,11 @@ function ledger.apply_process_complete(state, process_instance_id, outputs, note
     total_output_qty = total_output_qty + qty
   end
 
-  local committed_basis = (instance.committed_cost_total or 0) + (instance.fees_total or 0)
+  local completed_at = opts.completed_at or os.date("!%Y-%m-%dT%H:%M:%SZ")
+  local time_cost = build_process_time_cost(state, instance, completed_at)
+  local time_cost_gold = time_cost and (time_cost.amount_gold or 0) or 0
+
+  local committed_basis = (instance.committed_cost_total or 0) + (instance.fees_total or 0) + time_cost_gold
   local committed_qty = 0
   local commodity_count = 0
   do
@@ -2053,7 +2310,7 @@ function ledger.apply_process_complete(state, process_instance_id, outputs, note
   local output_basis = 0
   if total_output_qty > 0 and committed_basis > 0 then
     local material_basis = instance.committed_cost_total or 0
-    local fee_basis = instance.fees_total or 0
+    local fee_basis = (instance.fees_total or 0) + time_cost_gold
     if commodity_count == 0 or committed_qty <= 0 then
       output_basis = material_basis + fee_basis
     elseif commodity_count > 1 then
@@ -2068,20 +2325,33 @@ function ledger.apply_process_complete(state, process_instance_id, outputs, note
   end
 
   local process_loss = committed_basis - output_basis
+  local events = {}
 
-  local completed_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
-  local events = {
-    {
-      event_type = "PROCESS_COMPLETE",
+  if time_cost and time_cost.amount_gold > 0 then
+    table.insert(events, {
+      event_type = "PROCESS_ADD_TIME_COST",
       payload = {
         process_instance_id = process_instance_id,
-        outputs = outputs,
-        note = note,
-        completed_at = completed_at,
+        amount_gold = time_cost.amount_gold,
+        elapsed_seconds = time_cost.elapsed_seconds,
+        rate_gold_per_hour = time_cost.rate_gold_per_hour,
+        reason = "auto_elapsed_time",
         game_time = game_time
       }
+    })
+  end
+
+  table.insert(events, {
+    event_type = "PROCESS_COMPLETE",
+    payload = {
+      process_instance_id = process_instance_id,
+      outputs = outputs,
+        revenue_gold = revenue_gold,
+      note = note,
+      completed_at = completed_at,
+      game_time = game_time
     }
-  }
+  })
 
   if process_loss > 0.0001 then
     table.insert(events, {
@@ -2103,168 +2373,187 @@ function ledger.apply_process_complete(state, process_instance_id, outputs, note
 end
 
 local function sum_committed_inputs(instance)
-  local totals = {}
-  for _, entry in ipairs(instance.committed_entries or {}) do
-    totals[entry.commodity] = (totals[entry.commodity] or 0) + (entry.qty or 0)
-  end
-  return totals
-end
-
-local function validate_disposition(totals, returned, lost)
-  for commodity, qty in pairs(returned) do
-    if type(qty) ~= "number" or qty < 0 then
-      error("Returned qty must be non-negative for " .. commodity)
-    end
-  end
-  for commodity, qty in pairs(lost) do
-    if type(qty) ~= "number" or qty < 0 then
-      error("Lost qty must be non-negative for " .. commodity)
-    end
-  end
-
-  for commodity, qty in pairs(totals) do
-    local ret = returned[commodity] or 0
-    local los = lost[commodity] or 0
-    if ret + los > qty + 0.0001 then
-      error("Disposition exceeds committed inputs for " .. commodity)
-    end
-  end
-end
-
-local function complete_missing_disposition(totals, returned, lost)
-  local has_returned = next(returned) ~= nil
-  local has_lost = next(lost) ~= nil
-
-  if not has_returned and not has_lost then
-    for commodity, qty in pairs(totals) do
-      lost[commodity] = qty
-    end
-    return returned, lost
-  end
-
-  if has_returned and not has_lost then
-    for commodity, qty in pairs(totals) do
-      local ret = returned[commodity] or 0
-      if ret > qty then
-        error("Returned qty exceeds committed inputs for " .. commodity)
+      local totals = {}
+      for _, entry in ipairs(instance.committed_entries or {}) do
+        totals[entry.commodity] = (totals[entry.commodity] or 0) + (entry.qty or 0)
       end
-      lost[commodity] = qty - ret
+      return totals
     end
-    return returned, lost
-  end
 
-  if has_lost and not has_returned then
-    for commodity, qty in pairs(totals) do
-      local los = lost[commodity] or 0
-      if los > qty then
-        error("Lost qty exceeds committed inputs for " .. commodity)
+    local function validate_disposition(totals, returned, lost)
+      for commodity, qty in pairs(returned) do
+        if type(qty) ~= "number" or qty < 0 then
+          error("Returned qty must be non-negative for " .. commodity)
+        end
       end
-      returned[commodity] = qty - los
-    end
-    return returned, lost
-  end
+      for commodity, qty in pairs(lost) do
+        if type(qty) ~= "number" or qty < 0 then
+          error("Lost qty must be non-negative for " .. commodity)
+        end
+      end
 
-  return returned, lost
-end
-
-function ledger.apply_process_abort(state, process_instance_id, disposition, note, game_time)
-  local instance = state.process_instances and state.process_instances[process_instance_id]
-  if not instance then
-    error("Process instance not found: " .. process_instance_id)
-  end
-
-  disposition = disposition or {}
-  local returned = disposition.returned or {}
-  local lost = disposition.lost or {}
-  local outputs = disposition.outputs or {}
-
-  local totals = sum_committed_inputs(instance)
-  returned, lost = complete_missing_disposition(totals, returned, lost)
-  validate_disposition(totals, returned, lost)
-
-  if next(returned) ~= nil and next(lost) ~= nil then
-    for commodity, qty in pairs(totals) do
-      local ret = returned[commodity] or 0
-      local los = lost[commodity] or 0
-      if math.abs((ret + los) - qty) > 0.0001 then
-        error("Disposition does not cover all committed inputs for " .. commodity)
+      for commodity, qty in pairs(totals) do
+        local ret = returned[commodity] or 0
+        local los = lost[commodity] or 0
+        if ret + los > qty + 0.0001 then
+          error("Disposition exceeds committed inputs for " .. commodity)
+        end
       end
     end
-  end
 
-  local total_output_qty = 0
-  for _, qty in pairs(outputs) do
-    total_output_qty = total_output_qty + qty
-  end
+    local function complete_missing_disposition(totals, returned, lost)
+      local has_returned = next(returned) ~= nil
+      local has_lost = next(lost) ~= nil
 
-  local committed_basis = (instance.committed_cost_total or 0) + (instance.fees_total or 0)
-  local committed_qty = 0
-  local commodity_count = 0
-  do
-    local totals = {}
-    for _, entry in ipairs(instance.committed_entries or {}) do
-      committed_qty = committed_qty + (entry.qty or 0)
-      totals[entry.commodity] = (totals[entry.commodity] or 0) + (entry.qty or 0)
-    end
-    for _ in pairs(totals) do
-      commodity_count = commodity_count + 1
-    end
-  end
-
-  local output_basis = 0
-  if total_output_qty > 0 and committed_basis > 0 then
-    local material_basis = instance.committed_cost_total or 0
-    local fee_basis = instance.fees_total or 0
-    if commodity_count == 0 or committed_qty <= 0 then
-      output_basis = material_basis + fee_basis
-    elseif commodity_count > 1 then
-      output_basis = material_basis + fee_basis
-    elseif committed_qty > 0 then
-      local ratio = total_output_qty / committed_qty
-      if ratio > 1 then
-        ratio = 1
+      if not has_returned and not has_lost then
+        for commodity, qty in pairs(totals) do
+          lost[commodity] = qty
+        end
+        return returned, lost
       end
-      output_basis = (material_basis * ratio) + fee_basis
+
+      if has_returned and not has_lost then
+        for commodity, qty in pairs(totals) do
+          local ret = returned[commodity] or 0
+          if ret > qty then
+            error("Returned qty exceeds committed inputs for " .. commodity)
+          end
+          lost[commodity] = qty - ret
+        end
+        return returned, lost
+      end
+
+      if has_lost and not has_returned then
+        for commodity, qty in pairs(totals) do
+          local los = lost[commodity] or 0
+          if los > qty then
+            error("Lost qty exceeds committed inputs for " .. commodity)
+          end
+          returned[commodity] = qty - los
+        end
+        return returned, lost
+      end
+
+      return returned, lost
     end
-  end
 
-  local process_loss = committed_basis - output_basis
+    function ledger.apply_process_abort(state, process_instance_id, disposition, note, game_time, opts)
+      opts = opts or {}
+      local revenue_gold = tonumber(opts.revenue_gold) or 0
+      local instance = state.process_instances and state.process_instances[process_instance_id]
+      if not instance then
+        error("Process instance not found: " .. process_instance_id)
+      end
 
-  local completed_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
-  local events = {
-    {
-      event_type = "PROCESS_ABORT",
-      payload = {
-        process_instance_id = process_instance_id,
-        disposition = {
-          returned = returned,
-          lost = lost,
-          outputs = outputs
-        },
-        note = note,
-        completed_at = completed_at,
-        game_time = game_time
-      }
-    }
-  }
+      disposition = disposition or {}
+      local returned = disposition.returned or {}
+      local lost = disposition.lost or {}
+      local outputs = disposition.outputs or {}
 
-  if process_loss > 0.0001 then
-    table.insert(events, {
-      event_type = "PROCESS_WRITE_OFF",
-      payload = {
-        process_instance_id = process_instance_id,
-        amount_gold = process_loss,
-        game_time = game_time
-      }
-    })
-  end
+      local totals = sum_committed_inputs(instance)
+      returned, lost = complete_missing_disposition(totals, returned, lost)
+      validate_disposition(totals, returned, lost)
 
-  ledger.record_events(state, events)
-  for _, event in ipairs(events) do
-    ledger.apply_event(state, event)
-  end
+      if next(returned) ~= nil and next(lost) ~= nil then
+        for commodity, qty in pairs(totals) do
+          local ret = returned[commodity] or 0
+          local los = lost[commodity] or 0
+          if math.abs((ret + los) - qty) > 0.0001 then
+            error("Disposition does not cover all committed inputs for " .. commodity)
+          end
+        end
+      end
 
-  return state
+      local total_output_qty = 0
+      for _, qty in pairs(outputs) do
+        total_output_qty = total_output_qty + qty
+      end
+
+      local completed_at = opts.completed_at or os.date("!%Y-%m-%dT%H:%M:%SZ")
+      local time_cost = build_process_time_cost(state, instance, completed_at)
+      local time_cost_gold = time_cost and (time_cost.amount_gold or 0) or 0
+
+      local committed_basis = (instance.committed_cost_total or 0) + (instance.fees_total or 0) + time_cost_gold
+      local committed_qty = 0
+      local commodity_count = 0
+      do
+        local totals_map = {}
+        for _, entry in ipairs(instance.committed_entries or {}) do
+          committed_qty = committed_qty + (entry.qty or 0)
+          totals_map[entry.commodity] = (totals_map[entry.commodity] or 0) + (entry.qty or 0)
+        end
+        for _ in pairs(totals_map) do
+          commodity_count = commodity_count + 1
+        end
+      end
+
+      local output_basis = 0
+      if total_output_qty > 0 and committed_basis > 0 then
+        local material_basis = instance.committed_cost_total or 0
+        local fee_basis = (instance.fees_total or 0) + time_cost_gold
+        if commodity_count == 0 or committed_qty <= 0 then
+          output_basis = material_basis + fee_basis
+        elseif commodity_count > 1 then
+          output_basis = material_basis + fee_basis
+        elseif committed_qty > 0 then
+          local ratio = total_output_qty / committed_qty
+          if ratio > 1 then
+            ratio = 1
+          end
+          output_basis = (material_basis * ratio) + fee_basis
+        end
+      end
+
+      local process_loss = committed_basis - output_basis
+
+      local events = {}
+      if time_cost and time_cost.amount_gold > 0 then
+        table.insert(events, {
+          event_type = "PROCESS_ADD_TIME_COST",
+          payload = {
+            process_instance_id = process_instance_id,
+            amount_gold = time_cost.amount_gold,
+            elapsed_seconds = time_cost.elapsed_seconds,
+            rate_gold_per_hour = time_cost.rate_gold_per_hour,
+            reason = "auto_elapsed_time",
+            game_time = game_time
+          }
+        })
+      end
+
+      table.insert(events, {
+        event_type = "PROCESS_ABORT",
+        payload = {
+          process_instance_id = process_instance_id,
+          disposition = {
+            returned = returned,
+            lost = lost,
+            outputs = outputs
+          },
+          revenue_gold = revenue_gold,
+          note = note,
+          completed_at = completed_at,
+          game_time = game_time
+        }
+      })
+
+      if process_loss > 0.0001 then
+        table.insert(events, {
+          event_type = "PROCESS_WRITE_OFF",
+          payload = {
+            process_instance_id = process_instance_id,
+            amount_gold = process_loss,
+            game_time = game_time
+          }
+        })
+      end
+
+      ledger.record_events(state, events)
+      for _, event in ipairs(events) do
+        ledger.apply_event(state, event)
+      end
+
+      return state
 end
 
 function ledger.apply_process_set_game_time(state, process_instance_id, game_time, scope, note)

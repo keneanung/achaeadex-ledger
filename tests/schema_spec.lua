@@ -553,9 +553,37 @@ describe("Schema Migration", function()
       
       local version = schema.migrate(db)
       
-      -- Should migrate to the latest version (currently 13)
-      assert.are.equal(13, version)
+      -- Should migrate to the latest version (currently 14)
+      assert.are.equal(14, version)
       
+      db:close()
+    end)
+  end)
+
+  describe("migration v14", function()
+    it("should add process passive column and process_time_costs table", function()
+      local db = lsqlite3.open_memory()
+      schema.migrate(db, 14)
+
+      local columns = {}
+      local stmt = db:prepare("PRAGMA table_info(process_instances)")
+      for row in stmt:nrows() do
+        columns[row.name] = true
+      end
+      stmt:finalize()
+
+      assert.is_true(columns.passive, "process_instances.passive should exist")
+
+      stmt = db:prepare([[SELECT name FROM sqlite_master WHERE type='table' AND name='process_time_costs']])
+      local has_table = false
+      for _ in stmt:nrows() do
+        has_table = true
+        break
+      end
+      stmt:finalize()
+
+      assert.is_true(has_table, "process_time_costs table should exist")
+
       db:close()
     end)
   end)

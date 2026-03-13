@@ -748,14 +748,33 @@ function projector.apply(conn, event)
 
   if event_type == "PROCESS_START" then
     exec_sql(conn, string.format(
-      "INSERT OR REPLACE INTO process_instances (process_instance_id, process_id, started_at, completed_at, status, note) " ..
-      "VALUES (%s, %s, %s, NULL, %s, %s)",
+      "INSERT OR REPLACE INTO process_instances (process_instance_id, process_id, started_at, completed_at, status, note, passive) " ..
+      "VALUES (%s, %s, %s, NULL, %s, %s, %s)",
       sql_value(payload.process_instance_id),
       sql_value(payload.process_id),
       sql_value(payload.started_at or ts),
       sql_value("in_flight"),
-      sql_value(payload.note)
+      sql_value(payload.note),
+      sql_value(payload.passive or 0)
     ))
+    return
+  end
+
+  if event_type == "PROCESS_APPLY" then
+    local process_instance_id = payload.process_instance_id or (event.id and ("XP-" .. tostring(event.id)) or nil)
+    if process_instance_id then
+      exec_sql(conn, string.format(
+        "INSERT OR REPLACE INTO process_instances (process_instance_id, process_id, started_at, completed_at, status, note, passive) " ..
+        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+        sql_value(process_instance_id),
+        sql_value(payload.process_id),
+        sql_value(payload.started_at or ts),
+        sql_value(payload.completed_at or ts),
+        sql_value("completed"),
+        sql_value(payload.note),
+        sql_value(payload.passive or 0)
+      ))
+    end
     return
   end
 
@@ -777,6 +796,20 @@ function projector.apply(conn, event)
       sql_value(payload.completed_at or ts),
       sql_value(payload.note),
       sql_value(payload.process_instance_id)
+    ))
+    return
+  end
+
+  if event_type == "PROCESS_ADD_TIME_COST" then
+    exec_sql(conn, string.format(
+      "INSERT OR REPLACE INTO process_time_costs (process_instance_id, at, amount_gold, elapsed_seconds, rate_gold_per_hour, reason, source_event_id) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+      sql_value(payload.process_instance_id),
+      sql_value(ts),
+      sql_value(payload.amount_gold or 0),
+      sql_value(payload.elapsed_seconds or 0),
+      sql_value(payload.rate_gold_per_hour or 0),
+      sql_value(payload.reason),
+      sql_value(event.id)
     ))
     return
   end
@@ -863,6 +896,7 @@ end
 
 function projector.truncate_domains(conn)
   local tables = {
+    "process_time_costs",
     "forge_write_offs",
     "item_transformations",
     "forge_session_items",

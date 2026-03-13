@@ -2,10 +2,13 @@
 
 describe("Pricing", function()
   local pricing
+  local inventory
 
   before_each(function()
     _G.AchaeadexLedger = nil
+    dofile("src/scripts/core/inventory.lua")
     dofile("src/scripts/core/pricing.lua")
+    inventory = _G.AchaeadexLedger.Core.Inventory
     pricing = _G.AchaeadexLedger.Core.Pricing
   end)
 
@@ -25,6 +28,71 @@ describe("Pricing", function()
     assert.are.equal(8000, result.rounded_base_gold)
     assert.are.equal(14000, result.suggested.high)
   end)
+
+  it("suggests commodity prices from current WAC for arbitrary quantity", function()
+    local state = { inventory = inventory.new() }
+    inventory.add(state.inventory, "leather", 10, 20)
+
+    local result = pricing.suggest_commodity(state, "leather", { qty = 5 })
+
+    assert.are.equal("leather", result.commodity)
+    assert.are.equal(5, result.qty)
+    assert.are.equal(20, result.unit_wac)
+    assert.are.equal(100, result.base_cost_total)
+    assert.are.equal(100, result.rounded_base_total)
+    assert.are.equal(130, result.suggested_total.low)
+    assert.are.equal(150, result.suggested_total.mid)
+    assert.are.equal(200, result.suggested_total.high)
+    assert.are.equal(26, result.suggested_unit.low)
+    assert.are.equal(30, result.suggested_unit.mid)
+    assert.are.equal(40, result.suggested_unit.high)
+  end)
+
+  it("scales commodity totals with qty while deriving unit suggestions from totals", function()
+    local state = { inventory = inventory.new() }
+    inventory.add(state.inventory, "leather", 50, 20)
+
+    local one = pricing.suggest_commodity(state, "leather", { qty = 1, tier = "mid" })
+    local ten = pricing.suggest_commodity(state, "leather", { qty = 10, tier = "mid" })
+
+    assert.are.equal(30, one.suggested_total.mid)
+    assert.are.equal(30, one.suggested_unit.mid)
+    assert.are.equal(300, ten.suggested_total.mid)
+    assert.are.equal(math.ceil(ten.suggested_total.mid / 10), ten.suggested_unit.mid)
+  end)
+
+  it("errors when commodity has no known WAC", function()
+    local state = { inventory = inventory.new() }
+
+    assert.has_error(function()
+      pricing.suggest_commodity(state, "silk", {})
+    end, "commodity 'silk' has no known WAC; initialize or acquire it first")
+  end)
+
+  it("errors when commodity qty is not positive", function()
+    local state = { inventory = inventory.new() }
+    inventory.add(state.inventory, "leather", 10, 20)
+
+    assert.has_error(function()
+      pricing.suggest_commodity(state, "leather", { qty = 0 })
+    end, "qty must be > 0")
+  end)
+
+  it("applies commodity rounding step consistently", function()
+    local state = { inventory = inventory.new() }
+    inventory.add(state.inventory, "wood", 100, 7)
+
+    local result = pricing.suggest_commodity(state, "wood", {
+      qty = 3,
+      extra_gold = 2
+    })
+
+    assert.are.equal(23, result.adjusted_base_total)
+    assert.are.equal(30, result.rounded_base_total)
+    assert.are.equal(40, result.suggested_total.low)
+    assert.are.equal(50, result.suggested_total.mid)
+    assert.are.equal(60, result.suggested_total.high)
+  end)
 end)
 
 describe("Order settlement allocation", function()
@@ -39,6 +107,7 @@ describe("Order settlement allocation", function()
     dofile("src/scripts/core/pattern_pools.lua")
     dofile("src/scripts/core/production_sources.lua")
     dofile("src/scripts/core/recovery.lua")
+    dofile("src/scripts/core/costing.lua")
     dofile("src/scripts/core/ledger.lua")
     dofile("src/scripts/core/storage/memory_event_store.lua")
 
@@ -84,6 +153,7 @@ describe("Order price suggestions", function()
     dofile("src/scripts/core/pattern_pools.lua")
     dofile("src/scripts/core/production_sources.lua")
     dofile("src/scripts/core/recovery.lua")
+    dofile("src/scripts/core/costing.lua")
     dofile("src/scripts/core/ledger.lua")
     dofile("src/scripts/core/storage/memory_event_store.lua")
 
@@ -200,9 +270,12 @@ describe("Source price quote", function()
   local pricing
   local ledger
   local memory_store
+  local costing
+  local json
 
   before_each(function()
     _G.AchaeadexLedger = nil
+    dofile("src/scripts/core/costing.lua")
     dofile("src/scripts/core/pricing.lua")
     dofile("src/scripts/core/json.lua")
     dofile("src/scripts/core/inventory.lua")
@@ -216,6 +289,8 @@ describe("Source price quote", function()
     pricing = _G.AchaeadexLedger.Core.Pricing
     ledger = _G.AchaeadexLedger.Core.Ledger
     memory_store = _G.AchaeadexLedger.Core.MemoryEventStore
+    costing = _G.AchaeadexLedger.Core.Costing
+    json = _G.AchaeadexLedger.Core.Json
   end)
 
   it("quotes by primary source id", function()
@@ -271,7 +346,7 @@ describe("Source price quote", function()
     })
 
     assert.are.equal("explicit", quote.materials_source)
-    assert.are.equal(15, quote.components.materials_cost)
+    assert.are.equal(15, quote.components.materials_cost_gold)
   end)
 
   it("missing WAC yields warning without failing", function()
@@ -284,7 +359,7 @@ describe("Source price quote", function()
     local quote = pricing.quote_source(state, "D1", {})
     assert.are.equal(1, quote.missing_wac_count)
     assert.are.equal(1, #quote.warnings)
-    assert.are.equal(0, quote.components.materials_cost)
+    assert.are.equal(0, quote.components.materials_cost_gold)
   end)
 
   it("rounding override follows same pricing math as suggest", function()
@@ -308,6 +383,35 @@ describe("Source price quote", function()
     assert.are.equal(expected.suggested.low, quote.per_unit.low)
     assert.are.equal(expected.suggested.mid, quote.per_unit.mid)
     assert.are.equal(expected.suggested.high, quote.per_unit.high)
+  end)
+
+  it("uses the same shared material and time cost basis as crafting", function()
+    local store = memory_store.new()
+    local state = ledger.new(store)
+
+    ledger.apply_opening_inventory(state, "leather", 10, 20)
+    ledger.apply_design_start(state, "D1", "shirt", "Design 1", "public", 0)
+    ledger.apply_design_set_bom(state, "D1", { leather = 2 })
+    ledger.apply_design_set_fee(state, "D1", 15)
+
+    local quote = pricing.quote_source(state, "D1", {
+      time_hours = 1.5,
+      time_cost_per_hour = 25
+    })
+
+    local time_cost = costing.compute_time_cost_from_hours(1.5, 25).amount_gold
+    ledger.apply_craft_item_auto(state, "I-Q1", "D1", {
+      time_hours = 1.5,
+      time_cost_gold = time_cost
+    })
+
+    local breakdown = json.decode(state.crafted_items["I-Q1"].cost_breakdown_json)
+    assert.are.equal(40, quote.components.materials_cost_gold)
+    assert.are.equal(40, breakdown.materials_cost_gold)
+    assert.are.equal(38, quote.components.time_cost_gold)
+    assert.are.equal(38, breakdown.time_cost_gold)
+    assert.are.equal(93, quote.base_cost)
+    assert.are.equal(93, breakdown.total_operational_cost_gold)
   end)
 
   it("suggest_item resolves item source via alias mapping", function()

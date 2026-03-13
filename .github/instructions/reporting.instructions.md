@@ -56,6 +56,9 @@ Content (minimum):
 - Operational cost (sum of operational_cost)
 - Operational profit = revenue - operational_cost
 - Process losses (sum PROCESS_WRITE_OFF.amount_gold)
+- Process revenue (sum of explicit process revenue amounts, if any)
+- Process total cost (sum of costs for revenue-emitting processes, if any)
+- Process net result = process revenue - process total cost (if any)
 - Applied to design capital (sum)
 - Applied to pattern capital (sum)
 - True profit (sum), MUST be reduced by process losses
@@ -81,6 +84,7 @@ Behavior:
 
 Content:
 Same rollups as overall report, but restricted to that year.
+If process revenue activity exists in the selected year, also show process revenue, process total cost, and process net result.
 
 Process losses attribution for year report:
 - resolved_year for PROCESS_WRITE_OFF must be determined in order:
@@ -186,9 +190,14 @@ HOLDINGS / TIED-UP VALUE (INVENTORY, WIP, UNSOLD ITEMS)
 
 Definitions:
 - Inventory value (WAC): sum(qty_on_hand * wac_unit_cost)
-- WIP: sum(committed input basis + committed fees) for in-flight processes
+- WIP: sum(committed input basis + committed fees + committed time cost) for in-flight processes
 - Unsold items value: sum(operational_cost_gold) for crafted_items not yet sold (optional)
 - External items holdings: sum(basis_gold) for external_items where status='active'
+
+Process time cost reporting:
+- PROCESS_ADD_TIME_COST contributes to process operational cost.
+- Time cost must already be included in output basis and process write-offs where applicable.
+- Reports must not double-count process time cost.
 
 Which reports include holdings:
 A) Overall report: MUST include inventory + WIP + unsold + process losses line and true profit reduced by losses.
@@ -197,6 +206,12 @@ C) Year report: MUST include year activity + current holdings snapshot.
 D) Order report: MUST NOT include global holdings.
 E) Design report: MUST include design-scoped unsold items value; no global inventory.
 F) Item report: MUST show unsold basis if unsold; no global inventory.
+
+Process revenue handling:
+- Explicit process revenue is revenue only.
+- It MUST NOT appear in inventory or holdings valuation.
+- Commodity outputs, including `gold`, remain inventory when emitted via outputs.
+- Process detail reports SHOULD show revenue, total process cost, and net result when revenue exists.
 
 Warnings:
 - If holdings component cannot be computed (e.g., missing WAC), emit WARNING.

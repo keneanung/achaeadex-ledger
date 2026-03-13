@@ -13,6 +13,14 @@ local function get_inventory()
   return _G.AchaeadexLedger.Core.Inventory
 end
 
+local function get_costing()
+  if not _G.AchaeadexLedger or not _G.AchaeadexLedger.Core or not _G.AchaeadexLedger.Core.Costing then
+    error("AchaeadexLedger.Core.Costing is not loaded")
+  end
+
+  return _G.AchaeadexLedger.Core.Costing
+end
+
 local function round_up(value, step)
   if step <= 0 then
     return value
@@ -21,10 +29,10 @@ local function round_up(value, step)
 end
 
 local function clamp(value, min_value, max_value)
-  if value < min_value then
+  if min_value ~= nil and value < min_value then
     return min_value
   end
-  if value > max_value then
+  if max_value ~= nil and value > max_value then
     return max_value
   end
   return value
@@ -37,6 +45,17 @@ function pricing.default_policy()
       low = { markup_percent = 0.60, min_profit_gold = 200, max_profit_gold = 1500 },
       mid = { markup_percent = 0.90, min_profit_gold = 400, max_profit_gold = 3000 },
       high = { markup_percent = 1.20, min_profit_gold = 600, max_profit_gold = 6000 }
+    }
+  }
+end
+
+function pricing.default_commodity_policy()
+  return {
+    round_to_gold = 10,
+    tiers = {
+      low = { markup_percent = 0.25, min_profit_gold = 0, max_profit_gold = nil },
+      mid = { markup_percent = 0.50, min_profit_gold = 0, max_profit_gold = nil },
+      high = { markup_percent = 1.00, min_profit_gold = 0, max_profit_gold = nil }
     }
   }
 end
@@ -79,6 +98,73 @@ local function build_selected_tiers(tier)
     return { high = true }
   end
   return { low = true, mid = true, high = true }
+end
+
+function pricing.suggest_commodity(state, commodity, opts)
+  assert(type(state) == "table", "state must be a table")
+  assert(type(commodity) == "string", "commodity must be a string")
+
+  opts = opts or {}
+  local qty = tonumber(opts.qty) or 1
+  local tier = opts.tier or "all"
+  local round_override = opts.round and tonumber(opts.round) or nil
+  local extra_gold = tonumber(opts.extra_gold) or 0
+
+  if qty <= 0 then
+    error("qty must be > 0")
+  end
+  if extra_gold < 0 then
+    error("extra must be >= 0")
+  end
+  if tier ~= "low" and tier ~= "mid" and tier ~= "high" and tier ~= "all" then
+    error("tier must be one of low|mid|high|all")
+  end
+
+  local inventory = get_inventory()
+  local unit_wac = inventory.get_unit_cost(state.inventory, commodity)
+  local qty_on_hand = inventory.get_qty(state.inventory, commodity)
+
+  if qty_on_hand <= 0 or unit_wac <= 0 then
+    error("commodity '" .. tostring(commodity) .. "' has no known WAC; initialize or acquire it first")
+  end
+
+  local base_cost_total = unit_wac * qty
+  local adjusted_base_total = base_cost_total + extra_gold
+  local policy = pricing.default_commodity_policy()
+  if round_override and round_override > 0 then
+    policy = {
+      round_to_gold = round_override,
+      tiers = policy.tiers
+    }
+  end
+
+  local suggestion = pricing.suggest_prices(adjusted_base_total, policy)
+  local selected_tiers = build_selected_tiers(tier)
+  local total_suggested = {
+    low = selected_tiers.low and suggestion.suggested.low or nil,
+    mid = selected_tiers.mid and suggestion.suggested.mid or nil,
+    high = selected_tiers.high and suggestion.suggested.high or nil
+  }
+  local unit_suggested = {
+    low = total_suggested.low and math.ceil(total_suggested.low / qty) or nil,
+    mid = total_suggested.mid and math.ceil(total_suggested.mid / qty) or nil,
+    high = total_suggested.high and math.ceil(total_suggested.high / qty) or nil
+  }
+
+  return {
+    commodity = commodity,
+    qty = qty,
+    qty_on_hand = qty_on_hand,
+    unit_wac = unit_wac,
+    base_cost_total = base_cost_total,
+    extra_gold = extra_gold,
+    adjusted_base_total = adjusted_base_total,
+    rounded_base_total = suggestion.rounded_base_gold,
+    tier = tier,
+    round_to_gold = policy.round_to_gold,
+    suggested_total = total_suggested,
+    suggested_unit = unit_suggested
+  }
 end
 
 function pricing.resolve_source_identifier(state, source_id_or_alias)
@@ -181,37 +267,35 @@ function pricing.quote_source(state, source_id_or_alias, opts)
   end
 
   local inventory = get_inventory()
-  local material_rows = {}
+  local costing = get_costing()
   local warnings = {}
-  local materials_cost = 0
-  local missing_wac_count = 0
+  local material_result = costing.compute_materials_breakdown(materials, {
+    get_unit_cost = function(commodity)
+      return inventory.get_unit_cost(state.inventory, commodity)
+    end,
+    validate_qty = true
+  })
 
-  local keys = {}
-  for commodity in pairs(materials) do
-    table.insert(keys, commodity)
-  end
-  table.sort(keys)
-
-  for _, commodity in ipairs(keys) do
-    local qty_needed = tonumber(materials[commodity]) or 0
-    local unit_wac = inventory.get_unit_cost(state.inventory, commodity) or 0
-    local subtotal = qty_needed * unit_wac
-    if unit_wac <= 0 and qty_needed > 0 then
-      missing_wac_count = missing_wac_count + 1
-      table.insert(warnings, "WARNING: Missing WAC for " .. tostring(commodity) .. " (use adex inv init/broker buy)")
+  for _, row in ipairs(material_result.material_lines) do
+    if row.unit_wac <= 0 and row.qty > 0 then
+      table.insert(warnings, "WARNING: Missing WAC for " .. tostring(row.commodity) .. " (use adex inv init/broker buy)")
     end
-    table.insert(material_rows, {
-      commodity = commodity,
-      qty = qty_needed,
-      unit_wac = unit_wac,
-      subtotal = subtotal
-    })
-    materials_cost = materials_cost + subtotal
   end
 
   local per_item_fee = tonumber(source.per_item_fee_gold) or 0
-  local time_cost = math.floor(time_hours * time_cost_per_hour)
-  local base_cost = materials_cost + per_item_fee + time_cost + extra_gold
+  local time_cost = costing.compute_time_cost_from_hours(time_hours, time_cost_per_hour).amount_gold
+  local breakdown = costing.compute_craft_cost_breakdown({
+    materials_cost_gold = material_result.materials_cost_gold,
+    materials = materials,
+    materials_source = opts.materials and "explicit" or "design_bom",
+    per_item_fee_gold = per_item_fee,
+    time_hours = time_hours,
+    time_cost_gold = time_cost,
+    direct_fee_gold = extra_gold,
+    allocated_session_cost_gold = 0,
+    carried_basis_gold = 0
+  })
+  local base_cost = breakdown.total_operational_cost_gold
   local policy = source.pricing_policy or pricing.default_policy()
   local policy_used = source.pricing_policy and "source" or "default"
 
@@ -246,16 +330,11 @@ function pricing.quote_source(state, source_id_or_alias, opts)
     source_type = source.source_type,
     source_kind = source.source_kind,
     policy_used = policy_used,
-    material_rows = material_rows,
+    material_rows = material_result.material_lines,
     materials_source = opts.materials and "explicit" or "design_bom",
-    missing_wac_count = missing_wac_count,
+    missing_wac_count = material_result.missing_wac_count,
     warnings = warnings,
-    components = {
-      materials_cost = materials_cost,
-      per_item_fee = per_item_fee,
-      time_cost = time_cost,
-      extra = extra_gold
-    },
+    components = breakdown,
     base_cost = suggested.base_cost_gold,
     rounded_base = suggested.rounded_base_gold,
     tier = tier,

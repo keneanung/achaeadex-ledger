@@ -15,6 +15,16 @@ local function get_inventory()
   return _G.AchaeadexLedger.Core.Inventory
 end
 
+local function get_costing()
+  if not _G.AchaeadexLedger
+    or not _G.AchaeadexLedger.Core
+    or not _G.AchaeadexLedger.Core.Costing then
+    error("AchaeadexLedger.Core.Costing is not loaded")
+  end
+
+  return _G.AchaeadexLedger.Core.Costing
+end
+
 local function ensure_state(state)
   state.process_instances = state.process_instances or {}
 end
@@ -78,6 +88,14 @@ local function compute_output_basis(material_cost, fees_total, committed_qty, ou
   return (material_cost * ratio) + fees_total
 end
 
+local function total_output_qty(outputs)
+  local total = 0
+  for _, qty in pairs(outputs or {}) do
+    total = total + (tonumber(qty) or 0)
+  end
+  return total
+end
+
 local function allocate_from_entries(instance, commodity, qty, apply_fn)
   local remaining = qty
   local i = 1
@@ -109,7 +127,7 @@ local function allocate_from_entries(instance, commodity, qty, apply_fn)
   end
 end
 
-function deferred.start(state, process_instance_id, process_id, inputs, gold_fee, note, started_at)
+function deferred.start(state, process_instance_id, process_id, inputs, gold_fee, note, started_at, passive)
   assert(type(process_instance_id) == "string", "process_instance_id must be a string")
   assert(type(process_id) == "string", "process_id must be a string")
 
@@ -126,10 +144,15 @@ function deferred.start(state, process_instance_id, process_id, inputs, gold_fee
     started_at = started_at or os.date("!%Y-%m-%dT%H:%M:%SZ"),
     completed_at = nil,
     status = "in_flight",
+    passive = passive == 1 and 1 or 0,
     note = note,
     committed_entries = {},
     committed_cost_total = 0,
-    fees_total = gold_fee or 0
+    direct_fee_total = gold_fee or 0,
+    time_cost_total = 0,
+    fees_total = gold_fee or 0,
+    elapsed_seconds = 0,
+    rate_gold_per_hour = 0
   }
 
   inputs = inputs or {}
@@ -180,7 +203,33 @@ function deferred.add_fee(state, process_instance_id, gold_fee, note)
     error("Process instance not in flight: " .. process_instance_id)
   end
 
-  instance.fees_total = instance.fees_total + gold_fee
+  instance.direct_fee_total = (instance.direct_fee_total or 0) + gold_fee
+  instance.fees_total = (instance.fees_total or 0) + gold_fee
+  if note then
+    instance.note = note
+  end
+
+  return instance
+end
+
+function deferred.add_time_cost(state, process_instance_id, amount_gold, elapsed_seconds, rate_gold_per_hour, note)
+  ensure_state(state)
+
+  local instance = state.process_instances[process_instance_id]
+  if not instance then
+    error("Process instance not found: " .. process_instance_id)
+  end
+
+  local amount = tonumber(amount_gold) or 0
+  if amount < 0 then
+    error("amount_gold must be non-negative")
+  end
+
+  instance.time_cost_total = (instance.time_cost_total or 0) + amount
+  instance.fees_total = (instance.fees_total or 0) + amount
+  instance.elapsed_seconds = tonumber(elapsed_seconds) or (instance.elapsed_seconds or 0)
+  instance.rate_gold_per_hour = tonumber(rate_gold_per_hour) or (instance.rate_gold_per_hour or 0)
+
   if note then
     instance.note = note
   end
@@ -200,18 +249,15 @@ function deferred.complete(state, process_instance_id, outputs, note, completed_
   end
 
   outputs = outputs or {}
-  local total_output_qty = 0
-  for _, qty in pairs(outputs) do
-    total_output_qty = total_output_qty + qty
-  end
+  local output_qty = total_output_qty(outputs)
 
   local material_cost = instance.committed_cost_total
   local fees_total = instance.fees_total
   local committed_qty, commodity_count = committed_stats(instance)
-  local output_basis = compute_output_basis(material_cost, fees_total, committed_qty, total_output_qty, commodity_count)
+  local output_basis = compute_output_basis(material_cost, fees_total, committed_qty, output_qty, commodity_count)
   local output_unit_cost = 0
-  if total_output_qty > 0 then
-    output_unit_cost = output_basis / total_output_qty
+  if output_qty > 0 then
+    output_unit_cost = output_basis / output_qty
   end
 
   local inventory = get_inventory()
@@ -224,6 +270,9 @@ function deferred.complete(state, process_instance_id, outputs, note, completed_
   instance.note = note or instance.note
   instance.outputs = outputs
   instance.output_unit_cost = output_unit_cost
+
+  local costing = get_costing()
+  instance.elapsed_seconds = costing.elapsed_seconds(instance.started_at, instance.completed_at) or instance.elapsed_seconds or 0
 
   return instance
 end
@@ -262,15 +311,12 @@ function deferred.abort(state, process_instance_id, disposition, note, completed
     end)
   end
 
-  local total_output_qty = 0
-  for _, qty in pairs(outputs) do
-    total_output_qty = total_output_qty + qty
-  end
+  local output_qty = total_output_qty(outputs)
 
-  local output_basis = compute_output_basis(material_cost, fees_total, committed_qty, total_output_qty, commodity_count)
+  local output_basis = compute_output_basis(material_cost, fees_total, committed_qty, output_qty, commodity_count)
   local output_unit_cost = 0
-  if total_output_qty > 0 then
-    output_unit_cost = output_basis / total_output_qty
+  if output_qty > 0 then
+    output_unit_cost = output_basis / output_qty
   end
 
   for commodity, qty in pairs(outputs) do
@@ -281,7 +327,11 @@ function deferred.abort(state, process_instance_id, disposition, note, completed
   instance.completed_at = completed_at or os.date("!%Y-%m-%dT%H:%M:%SZ")
   instance.note = note or instance.note
   instance.disposition = disposition
+  instance.outputs = outputs
   instance.output_unit_cost = output_unit_cost
+
+  local costing = get_costing()
+  instance.elapsed_seconds = costing.elapsed_seconds(instance.started_at, instance.completed_at) or instance.elapsed_seconds or 0
 
   return instance
 end

@@ -23,6 +23,10 @@ Operational Cost:
 Operational Profit:
   sale_price - operational_cost
 
+Process Revenue:
+  Gold emitted by a process as output.
+  Process revenue is revenue only and never inventory.
+
 Design Capital:
   Accumulated gold spent on design creation (submission, resubmission, finalize).
 
@@ -51,6 +55,12 @@ Appearance:
 
 Deferred Process:
   A process begins at time T0, may accrue additional costs during execution, and only at completion time T1 is output known.
+
+Passive Process:
+  Process instance marked passive=1. Passive processes do not accrue time cost.
+
+Active Process:
+  Process instance marked passive=0. Active processes may accrue time cost if the time-cost cutover and configured rate allow it.
 
 ------------------------------------------------------------
 INVENTORY VALUATION
@@ -90,6 +100,11 @@ GENERIC PROCESSES (REFINEMENT / TRANSFORMATION)
    - WAC of consumed inputs
    - plus gold_fee
    - plus time cost (if enabled)
+6) Process revenue MUST be carried separately from commodity outputs.
+  - `gold` as a commodity output remains normal inventory with WAC.
+  - explicit process revenue is revenue only,
+  - it is never inventory,
+  - it never receives allocated output basis.
 
 ------------------------------------------------------------
 DEFERRED PROCESSES (START -> COMPLETE/ABORT)
@@ -124,6 +139,12 @@ If process_loss_gold > 0:
 - record PROCESS_WRITE_OFF
 - treat as operational expense (reduces true profit)
 - must be attributable to process_instance_id
+
+Revenue-emitting processes:
+- A process may record explicit gold revenue alongside normal outputs.
+- Process revenue does not change process write-off rules.
+- Process revenue is reported separately from inventory outputs.
+- Net result for such a process is revenue - total process cost.
 
 ------------------------------------------------------------
 PATTERNS
@@ -160,6 +181,11 @@ TIME COST
 
 - Configurable gold/hour, default 0.
 - When enabled, part of operational cost.
+- Process time cost must be recorded explicitly as a ledger event.
+- Deferred processes accrue time cost from elapsed wall-clock time between start and complete/abort.
+- Immediate processes accrue time cost only from explicit provided duration.
+- Rounding rule: `ceil(elapsed_seconds * gold_per_hour / 3600)`.
+- Processes created before the configured cutover behave as passive by default.
 
 ------------------------------------------------------------
 CRAFT ATTRIBUTION VIA APPEARANCE

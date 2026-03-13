@@ -220,6 +220,7 @@ process_instances(
   started_at TEXT NOT NULL,
   completed_at TEXT,
   status TEXT NOT NULL,                -- in_flight|completed|aborted
+  passive INTEGER NOT NULL DEFAULT 0,
   note TEXT
 )
 
@@ -288,9 +289,12 @@ Processes:
 - PROCESS_START
 - PROCESS_ADD_INPUTS
 - PROCESS_ADD_FEE
+- PROCESS_ADD_TIME_COST
 - PROCESS_COMPLETE
 - PROCESS_ABORT
 - PROCESS_WRITE_OFF
+- PROCESS_SET_TIME_COST_RATE
+- PROCESS_SET_TIME_COST_CUTOVER
 
 Patterns:
 - PATTERN_ACTIVATE
@@ -352,11 +356,27 @@ BROKER_SELL supports:
 
 PROCESS_APPLY must support:
 {
+  process_instance_id,
   process_id,
   inputs: { commodity: qty },
   outputs: { commodity: qty },
-  gold_fee
+  revenue_gold,
+  gold_fee,
+  passive,
+  started_at,
+  completed_at,
+  elapsed_seconds,
+  rate_gold_per_hour,
+  time_cost_gold,
+  cost_breakdown_json
 }
+
+Special output rule:
+- `outputs.gold` is a normal commodity output.
+- Explicit process revenue must use `revenue_gold`.
+- `revenue_gold` is revenue only, not inventory.
+- `revenue_gold` must not create or mutate inventory commodity rows.
+- `revenue_gold` must not receive WAC output basis.
 
 PROCESS_START must support:
 {
@@ -364,6 +384,7 @@ PROCESS_START must support:
   process_id,
   inputs: { commodity: qty },         -- inputs committed at start (may be empty)
   gold_fee,                           -- optional
+  passive,                            -- optional 1/0; if omitted defaults from cutover policy
   note
 }
 
@@ -381,16 +402,29 @@ PROCESS_ADD_FEE must support:
   note
 }
 
+PROCESS_ADD_TIME_COST must support:
+{
+  process_instance_id,
+  amount_gold,
+  elapsed_seconds,
+  rate_gold_per_hour,
+  reason                              -- "auto_elapsed_time"
+}
+
 PROCESS_COMPLETE must support:
 {
   process_instance_id,
   outputs: { commodity: qty },        -- MAY be empty
+  revenue_gold,
   note
 }
+
+`revenue_gold` on PROCESS_COMPLETE represents process revenue only.
 
 PROCESS_ABORT must support:
 {
   process_instance_id,
+  revenue_gold,
   disposition: {
     returned: { commodity: qty },     -- returned to inventory (may be empty)
     lost: { commodity: qty },         -- permanently lost/consumed (may be empty)
@@ -398,6 +432,8 @@ PROCESS_ABORT must support:
   },
   note
 }
+
+If `revenue_gold` is present on PROCESS_ABORT, it is revenue only and never inventory.
 
 PROCESS_WRITE_OFF supports:
 {
@@ -415,6 +451,21 @@ PROCESS_SET_GAME_TIME supports:
   game_time,                           -- same shape as SELL_ITEM.game_time
   note?
 }
+
+PROCESS_SET_TIME_COST_RATE supports:
+{
+  rate_gold_per_hour
+}
+
+PROCESS_SET_TIME_COST_CUTOVER supports:
+{
+  enabled_from_ts
+}
+
+Process time-cost application rules:
+- Deferred processes emit PROCESS_ADD_TIME_COST before PROCESS_COMPLETE / PROCESS_ABORT when active, after cutover, and elapsed_seconds > 0.
+- Immediate processes emit PROCESS_ADD_TIME_COST only when an explicit duration is provided and the process is active.
+- Rebuild must reproduce the same time-cost outcomes by replaying events in order.
 
 DESIGN_START supports:
 {
