@@ -15,6 +15,7 @@ describe("Crafting BOM and materials", function()
     dofile("src/scripts/core/production_sources.lua")
     dofile("src/scripts/core/recovery.lua")
     dofile("src/scripts/core/costing.lua")
+    dofile("src/scripts/core/cash.lua")
     dofile("src/scripts/core/ledger.lua")
     dofile("src/scripts/core/storage/memory_event_store.lua")
 

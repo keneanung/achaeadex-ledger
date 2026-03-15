@@ -16,6 +16,7 @@ describe("Reports", function()
     dofile("src/scripts/core/recovery.lua")
     dofile("src/scripts/core/json.lua")
     dofile("src/scripts/core/costing.lua")
+    dofile("src/scripts/core/cash.lua")
     dofile("src/scripts/core/ledger.lua")
     dofile("src/scripts/core/reports.lua")
     dofile("src/scripts/core/storage/memory_event_store.lua")
@@ -205,7 +206,7 @@ describe("Reports", function()
 
     local report = reports.year(state, 123)
     assert.are.equal(60, report.totals.process_losses)
-    assert.are.equal(-60, report.totals.true_profit)
+    assert.are.equal(0, report.totals.true_profit)
     assert.are.equal(0, report.unattributed_process_write_off_count)
   end)
 
@@ -320,6 +321,7 @@ describe("Reports", function()
     assert.are.equal(10, report.fees_gold)
     assert.are.equal(70, report.total_committed_gold)
     assert.are.equal(30, report.write_off_total_gold)
+    assert.are.equal(40, report.capitalized_basis_gold)
   end)
 
   it("deferred process with explicit revenue reports revenue, total cost, and net result without affecting inventory", function()
@@ -339,13 +341,24 @@ describe("Reports", function()
     assert.are.equal(50, process_report.fees_gold)
     assert.are.equal(95, process_report.total_process_cost_gold)
     assert.are.equal(405, process_report.net_result_gold)
+    assert.are.equal(0, process_report.capitalized_basis_gold)
     assert.are.same({}, process_report.outputs)
     assert.are.equal(0, inventory.get_qty(state.inventory, "gold"))
 
     local year_report = reports.year(state, 700)
     assert.are.equal(500, year_report.totals.process_revenue)
     assert.are.equal(95, year_report.totals.process_total_cost)
+    assert.are.equal(0, year_report.totals.process_basis_carried)
     assert.are.equal(405, year_report.totals.process_net_result)
+    assert.are.equal(405, year_report.totals.process_profit_contribution)
+    assert.are.equal(405, year_report.totals.true_profit)
+
+    local overall_report = reports.overall(state)
+    assert.are.equal(500, overall_report.totals.process_revenue)
+    assert.are.equal(0, overall_report.totals.process_basis_carried)
+    assert.are.equal(95, overall_report.totals.process_losses)
+    assert.are.equal(405, overall_report.totals.process_profit_contribution)
+    assert.are.equal(405, overall_report.totals.true_profit)
   end)
 
   it("immediate process with explicit revenue reports revenue and leaves WAC inventory unchanged", function()
@@ -374,11 +387,100 @@ describe("Reports", function()
     assert.are.equal(20, process_report.committed_cost_gold)
     assert.are.equal(45, process_report.total_process_cost_gold)
     assert.are.equal(80, process_report.net_result_gold)
+    assert.are.equal(0, process_report.capitalized_basis_gold)
 
     local overall = reports.overall(state)
     assert.are.equal(125, overall.totals.process_revenue)
     assert.are.equal(45, overall.totals.process_total_cost)
+    assert.are.equal(0, overall.totals.process_basis_carried)
     assert.are.equal(80, overall.totals.process_net_result)
+    assert.are.equal(45, overall.totals.process_losses)
+    assert.are.equal(80, overall.totals.process_profit_contribution)
+    assert.are.equal(80, overall.totals.true_profit)
+  end)
+
+  it("revenue-emitting processes show basis carried into outputs separately from profit contribution", function()
+    local store = memory_store.new()
+    local state = ledger.new(store)
+
+    ledger.apply_opening_inventory(state, "curatives", 10, 20)
+    ledger.apply_process(state, "harvest", { curatives = 1 }, { trophy = 1 }, 25, { year = 704 }, {
+      revenue_gold = 125
+    })
+
+    assert.are.equal(1, inventory.get_qty(state.inventory, "trophy"))
+    assert.are.equal(45, inventory.get_unit_cost(state.inventory, "trophy"))
+
+    local year_report = reports.year(state, 704)
+    assert.are.equal(125, year_report.totals.process_revenue)
+    assert.are.equal(45, year_report.totals.process_total_cost)
+    assert.are.equal(45, year_report.totals.process_basis_carried)
+    assert.are.equal(125, year_report.totals.process_net_result)
+    assert.are.equal(125, year_report.totals.process_profit_contribution)
+    assert.are.equal(125, year_report.totals.true_profit)
+  end)
+
+  it("true profit uses realized process net result rather than carried basis", function()
+    local store = memory_store.new()
+    local state = ledger.new(store)
+
+    ledger.apply_design_start(state, "D-REALIZED", "shirt", "Realized Shirt", "private", 1)
+    ledger.apply_design_cost(state, "D-REALIZED", 7578, "submission")
+    ledger.apply_opening_inventory(state, "cloth", 1, 48193)
+    ledger.apply_craft_item(state, "I-REALIZED", "D-REALIZED", 48193, json.encode({ total_operational_cost_gold = 48193 }), "realized shirt")
+    ledger.apply_sell_item(state, "S-REALIZED", "I-REALIZED", 63500, { year = 999 })
+    ledger.apply_process(state, "expedition", {}, { salvage = 1 }, 9185, { year = 999 }, {
+      revenue_gold = 10199
+    })
+
+    local year_report = reports.year(state, 999)
+    local overall_report = reports.overall(state)
+
+    assert.are.equal(15307, year_report.totals.operational_profit)
+    assert.are.equal(7578, year_report.totals.applied_to_design_capital)
+    assert.are.equal(10199, year_report.totals.process_revenue)
+    assert.are.equal(9185, year_report.totals.process_total_cost)
+    assert.are.equal(10199, year_report.totals.process_net_result)
+    assert.are.equal(0, year_report.totals.process_losses)
+    assert.are.equal(9185, year_report.totals.process_basis_carried)
+    assert.are.equal(10199, year_report.totals.process_profit_contribution)
+    assert.are.equal(17928, year_report.totals.true_profit)
+
+    assert.are.equal(17928, overall_report.totals.true_profit)
+    assert.are.equal(10199, overall_report.totals.process_profit_contribution)
+    assert.are.equal(9185, overall_report.totals.process_basis_carried)
+  end)
+
+  it("production process revenue is realized while committed basis remains capitalized in outputs", function()
+    local store = memory_store.new()
+    local state = ledger.new(store)
+
+    ledger.apply_process_time_cost_rate(state, 4781)
+    ledger.apply_process_time_cost_cutover(state, "2026-03-01T00:00:00Z")
+    ledger.apply_opening_inventory(state, "potash", 31, 1546 / 31)
+    ledger.apply_process(state, "hunting", { potash = 31 }, { malachite = 939, realgar = 61, skins = 54 }, 0, nil, {
+      revenue_gold = 2790,
+      time_hours = 1,
+      completed_at = "2026-03-13T03:00:00Z"
+    })
+
+    local process_id = next(state.process_instances)
+    local report = reports.process(state, process_id)
+    local overall = reports.overall(state)
+
+    assert.are.equal(2790, report.revenue_gold)
+    assert.are.equal(1546, report.committed_cost_gold)
+    assert.are.equal(4781, report.time_cost_gold)
+    assert.are.equal(6327, report.total_process_cost_gold)
+    assert.are.equal(0, report.write_off_total_gold)
+    assert.are.equal(6327, report.capitalized_basis_gold)
+    assert.are.equal(2790, report.net_result_gold)
+
+    assert.are.equal(2790, overall.totals.process_revenue)
+    assert.are.equal(6327, overall.totals.process_total_cost)
+    assert.are.equal(6327, overall.totals.process_basis_carried)
+    assert.are.equal(2790, overall.totals.process_net_result)
+    assert.are.equal(2790, overall.totals.process_profit_contribution)
   end)
 
   it("gold in process outputs is treated as a commodity when explicitly output", function()

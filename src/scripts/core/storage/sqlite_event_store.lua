@@ -273,6 +273,8 @@ end
 
 function sqlite_store:domain_counts()
   local tables = {
+    "cash_accounts",
+    "cash_movements",
     "production_sources",
     "designs",
     "design_id_aliases",

@@ -315,9 +315,7 @@ local function render_totals(render, totals)
     { label = "Operational cost", value = fmt(totals.operational_cost or 0) },
     { label = "Operational profit", value = fmt(totals.operational_profit or 0) },
     { label = "Applied to design capital", value = fmt(totals.applied_to_design_capital or 0) },
-    { label = "Applied to pattern capital", value = fmt(totals.applied_to_pattern_capital or 0) },
-    { label = "Process losses", value = fmt(totals.process_losses or 0) },
-    { label = "True profit", value = fmt(totals.true_profit or 0) }
+    { label = "Applied to pattern capital", value = fmt(totals.applied_to_pattern_capital or 0) }
   }
   if totals.process_revenue ~= nil then
     table.insert(rows, { label = "Process revenue", value = fmt(totals.process_revenue) })
@@ -327,6 +325,14 @@ local function render_totals(render, totals)
   end
   if totals.process_net_result ~= nil then
     table.insert(rows, { label = "Process net result", value = fmt(totals.process_net_result) })
+  end
+  if totals.process_profit_contribution ~= nil then
+    table.insert(rows, { label = "Process profit contribution", value = fmt(totals.process_profit_contribution) })
+  end
+  table.insert(rows, { label = "Process losses", value = fmt(totals.process_losses or 0) })
+  table.insert(rows, { label = "True profit", value = fmt(totals.true_profit or 0) })
+  if totals.process_basis_carried ~= nil then
+    table.insert(rows, { label = "Process basis carried", value = fmt(totals.process_basis_carried) })
   end
   if totals.process_losses_attributed ~= nil then
     table.insert(rows, { label = "Process losses attributed", value = fmt(totals.process_losses_attributed) })
@@ -366,6 +372,27 @@ local function render_holdings(render, holdings)
   end
 end
 
+local function render_cash_balances(render, balances)
+  local fmt = render.format_gold or tostring
+  local rows = {}
+  for _, row in ipairs(balances or {}) do
+    table.insert(rows, {
+      currency = row.currency,
+      balance = fmt(row.balance or 0)
+    })
+  end
+
+  if #rows == 0 then
+    render.print("No cash balances recorded.")
+    return
+  end
+
+  render.table(rows, {
+    { key = "currency", label = "Currency", nowrap = true, min = 12 },
+    { key = "balance", label = "Balance", align = "right", min = 10 }
+  })
+end
+
 local function render_warnings(render, warnings)
   if not warnings or #warnings == 0 then
     return
@@ -398,6 +425,30 @@ local help_topics = {
       {
         usage = "adex broker sell <commodity> <qty> <unit_price> [--order <order_id>] [--sale <sale_id>]",
         example = "adex broker sell leather 5 35 --order O-20260215-0001"
+      }
+    }
+  },
+  cash = {
+    title = "Cash",
+    purpose = "Manage currency balances as cash accounts. Balances are liquidity, not inventory; cash init records opening balances, and convert transfers value between currencies without creating profit.",
+    commands = {
+      {
+        usage = "adex cash init <currency> <amount> [--note <text>]",
+        example = "adex cash init gold 100000",
+        notes = "Opening balance only. This is not revenue and does not affect profit."
+      },
+      {
+        usage = "adex cash adjust <currency> <amount> [--reason <text>] [--note <text>]",
+        example = "adex cash adjust gold -500 --reason \"manual correction\""
+      },
+      {
+        usage = "adex cash convert <from_currency> <from_amount> <to_currency> <to_amount> [--note <text>]",
+        example = "adex cash convert credits 1 gold 600",
+        notes = "Conversion transfers balances between cash accounts and does not create profit or inventory."
+      },
+      {
+        usage = "adex cash show [<currency>]",
+        example = "adex cash show"
       }
     }
   },
@@ -506,7 +557,7 @@ local help_topics = {
     purpose = "Run immediate or deferred processes. Active processes accrue time cost automatically after the cutover; passive ones do not. Immediate processes only accrue time cost when --time is supplied. Use --revenue for session gold; commodities in --outputs are always inventory-valued outputs.",
     commands = {
       {
-        usage = "adex process apply <process_id> [--inputs k=v,...] --outputs k=v,... [--revenue <gold>] [--fee <gold>] [--passive 0|1] [--time <hours>] [--note <text>]",
+        usage = "adex process apply <process_id> [--inputs k=v,...] [--outputs k=v,...] [--revenue <gold>] [--fee <gold>] [--passive 0|1] [--time <hours>] [--note <text>]",
         example = "adex process apply hunting --inputs curatives=2 --revenue 1500 --time 1.5"
       },
       {
@@ -608,7 +659,8 @@ local help_topics = {
     commands = {
       {
         usage = "adex report overall",
-        example = "adex report overall"
+        example = "adex report overall",
+        notes = "Shows cash balances separately from inventory, WIP, unsold crafted items, and external items."
       },
       {
         usage = "adex report year <year|current> [--verbose]",
@@ -851,7 +903,7 @@ function commands.help(topic)
     })
 
     render.section("Topics")
-    local order = { "inv", "broker", "pattern", "design", "source", "item", "order", "process", "craft", "forge", "augment", "sell", "report", "show", "list", "price", "checkpoint", "config", "maintenance" }
+    local order = { "inv", "broker", "cash", "pattern", "design", "source", "item", "order", "process", "craft", "forge", "augment", "sell", "report", "show", "list", "price", "checkpoint", "config", "maintenance" }
     local rows = {}
     for _, topic_name in ipairs(order) do
       local entry = help_topics[topic_name]
@@ -878,7 +930,7 @@ function commands.help(topic)
   out_plain("  operational cost: material WAC + fees + time cost per item")
   out_plain("  true profit: profit after design and pattern capital recovery")
   out_plain("Commands:")
-  local order = { "inv", "broker", "pattern", "design", "source", "item", "order", "process", "craft", "forge", "augment", "sell", "report", "show", "list", "price", "checkpoint", "config", "maintenance" }
+  local order = { "inv", "broker", "cash", "pattern", "design", "source", "item", "order", "process", "craft", "forge", "augment", "sell", "report", "show", "list", "price", "checkpoint", "config", "maintenance" }
   for _, topic_name in ipairs(order) do
     local entry = help_topics[topic_name]
     if entry then
@@ -1057,6 +1109,8 @@ function commands.handle(input)
     _G.AchaeadexLedger.Mudlet.State = fresh_state
     render.section("Maintenance Rebuild")
     render.kv_block({
+      { label = "Cash accounts", value = tostring(counts.cash_accounts or 0) },
+      { label = "Cash movements", value = tostring(counts.cash_movements or 0) },
       { label = "Production sources", value = tostring(counts.production_sources or 0) },
       { label = "Designs (legacy)", value = tostring(counts.designs or 0) },
       { label = "Pattern pools", value = tostring(counts.pattern_pools or 0) },
@@ -1197,6 +1251,94 @@ function commands.handle(input)
     })
     out("profit: " .. tostring(profit))
     out("OK")
+    return
+  end
+
+  if cmd == "cash" and tokens[2] == "init" then
+    local currency = tokens[3]
+    local amount = tonumber(tokens[4])
+    local args, flags = parse_flags(tokens, 5)
+    local parse_err = validate_known_flags(flags, { "note" }) or validate_no_extra_args(args)
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
+    if not currency or amount == nil or amount < 0 or math.floor(amount) ~= amount then
+      error_out("usage: adex cash init <currency> <amount> [--note <text>]")
+      return
+    end
+    ledger.apply_cash_init(state, currency, amount, flags.note)
+    out("OK")
+    return
+  end
+
+  if cmd == "cash" and tokens[2] == "adjust" then
+    local currency = tokens[3]
+    local amount = tonumber(tokens[4])
+    local args, flags = parse_flags(tokens, 5)
+    local parse_err = validate_known_flags(flags, { "reason", "note" }) or validate_no_extra_args(args)
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
+    if not currency or amount == nil or math.floor(amount) ~= amount then
+      error_out("usage: adex cash adjust <currency> <amount> [--reason <text>] [--note <text>]")
+      return
+    end
+    ledger.apply_cash_adjust(state, currency, amount, flags.reason, flags.note)
+    out("OK")
+    return
+  end
+
+  if cmd == "cash" and tokens[2] == "convert" then
+    local from_currency = tokens[3]
+    local from_amount = tonumber(tokens[4])
+    local to_currency = tokens[5]
+    local to_amount = tonumber(tokens[6])
+    local args, flags = parse_flags(tokens, 7)
+    local parse_err = validate_known_flags(flags, { "note" }) or validate_no_extra_args(args)
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
+    if not from_currency or from_amount == nil or math.floor(from_amount) ~= from_amount or from_amount < 0
+      or not to_currency or to_amount == nil or math.floor(to_amount) ~= to_amount or to_amount < 0 then
+      error_out("usage: adex cash convert <from_currency> <from_amount> <to_currency> <to_amount> [--note <text>]")
+      return
+    end
+    ledger.apply_currency_convert(state, from_currency, from_amount, to_currency, to_amount, flags.note)
+    out("OK")
+    return
+  end
+
+  if cmd == "cash" and tokens[2] == "show" then
+    local args, flags = parse_flags(tokens, 3)
+    local parse_err = validate_known_flags(flags, {})
+    if parse_err then
+      error_out(parse_err)
+      return
+    end
+    if #args > 1 then
+      error_out("usage: adex cash show [<currency>]")
+      return
+    end
+
+    if args[1] then
+      local account, err = listings.show_cash_account(state, args[1])
+      if not account then
+        error_out(err or "cash account not found")
+        return
+      end
+      render.section("Cash Balance")
+      render.kv_block({
+        { label = "Currency", value = account.currency },
+        { label = "Balance", value = (render.format_gold or tostring)(account.balance or 0) }
+      })
+      return
+    end
+
+    render.section("Cash Balances")
+    render_cash_balances(render, listings.list_cash_accounts(state))
     return
   end
 
@@ -2021,8 +2163,8 @@ function commands.handle(input)
     local revenue_gold = 0
     local passive = flags.passive and tonumber(flags.passive) or nil
     local time_hours = flags.time and tonumber(flags.time) or nil
-    if not process_id or not flags.outputs then
-      error_out("usage: adex process apply <process_id> [--inputs k=v,...] --outputs k=v,... [--revenue <gold>] [--fee <gold>] [--passive 0|1] [--time <hours>] [--note <text>]")
+    if not process_id then
+      error_out("usage: adex process apply <process_id> [--inputs k=v,...] [--outputs k=v,...] [--revenue <gold>] [--fee <gold>] [--passive 0|1] [--time <hours>] [--note <text>]")
       return
     end
     if flags.revenue ~= nil then
@@ -2939,6 +3081,8 @@ function commands.handle(input)
     local fmt = render.format_gold or tostring
     render.section("Overall Report")
     render_totals(render, report.totals)
+    render.section("Cash Balances")
+    render_cash_balances(render, report.cash_balances)
     render.section("Holdings")
     render_holdings(render, report.holdings)
     render.section("Outstanding Capital")
@@ -2991,6 +3135,8 @@ function commands.handle(input)
     render.section("Year Report: " .. tostring(year))
     render.section("Year Activity")
     render_totals(render, report.totals)
+    render.section("Cash Balances")
+    render_cash_balances(render, report.cash_balances)
     render.section("Holdings Snapshot")
     render_holdings(render, report.holdings)
     if report.note then
@@ -3111,11 +3257,12 @@ function commands.handle(input)
       { label = "Committed input cost", value = fmt(report.committed_cost_gold) },
       { label = "Direct fees", value = fmt(report.direct_fee_gold) },
       { label = "Time cost", value = fmt(report.time_cost_gold) },
-      { label = "Fees", value = fmt(report.fees_gold) },
+      { label = "Add-on cost basis", value = fmt(report.fees_gold) },
       { label = "Total process cost", value = fmt(report.total_process_cost_gold or 0) },
       { label = "Net result", value = fmt(report.net_result_gold or 0) },
       { label = "Total committed", value = fmt(report.total_committed_gold) },
       { label = "Write-offs", value = fmt(report.write_off_total_gold) },
+      { label = "Capitalized basis", value = fmt(report.capitalized_basis_gold or 0) },
       { label = "Note", value = report.note or "" }
     })
 

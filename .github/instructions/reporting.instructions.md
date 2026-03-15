@@ -23,6 +23,7 @@ GENERAL REQUIREMENTS
    - Estimated materials used (if present)
    - External items with basis_source mtm or unknown
 4) Reports must display provenance + recovery_enabled for design sources.
+5) Cash balances must be reported separately from inventory / holdings valuation.
 
 Implementation:
 - Prefer implementing reports in core (src/scripts/core/**) and rendering in Mudlet layer.
@@ -64,6 +65,14 @@ Content (minimum):
 - True profit (sum), MUST be reduced by process losses
 - Outstanding design capital (sum remaining for recovery-enabled design sources)
 - Outstanding pattern capital (sum remaining across pools)
+
+Cash balances section:
+- List all known cash-account currencies with current balances.
+- Cash must appear separately from:
+   - inventory value
+   - WIP
+   - unsold crafted items
+   - external items holdings
 
 Warnings section:
 - MtM present
@@ -193,6 +202,7 @@ Definitions:
 - WIP: sum(committed input basis + committed fees + committed time cost) for in-flight processes
 - Unsold items value: sum(operational_cost_gold) for crafted_items not yet sold (optional)
 - External items holdings: sum(basis_gold) for external_items where status='active'
+- Cash balances: sum per cash-account currency; reported separately and never merged into inventory valuation
 
 Process time cost reporting:
 - PROCESS_ADD_TIME_COST contributes to process operational cost.
@@ -212,6 +222,10 @@ Process revenue handling:
 - It MUST NOT appear in inventory or holdings valuation.
 - Commodity outputs, including `gold`, remain inventory when emitted via outputs.
 - Process detail reports SHOULD show revenue, total process cost, and net result when revenue exists.
+
+Currency conversion handling:
+- Currency conversions affect cash balances only.
+- Currency conversions MUST NOT affect revenue, operational profit, or true profit directly.
 
 Warnings:
 - If holdings component cannot be computed (e.g., missing WAC), emit WARNING.

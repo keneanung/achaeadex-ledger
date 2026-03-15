@@ -163,6 +163,39 @@ function listings.list_commodities(state, opts)
   return rows
 end
 
+function listings.list_cash_accounts(state)
+  local rows = {}
+  for currency, balance in pairs(state.cash_accounts or {}) do
+    table.insert(rows, {
+      currency = currency,
+      balance = balance
+    })
+  end
+
+  table.sort(rows, function(a, b)
+    return tostring(a.currency) < tostring(b.currency)
+  end)
+
+  return rows
+end
+
+function listings.show_cash_account(state, currency)
+  local normalized = tostring(currency or ""):gsub("^%s+", ""):gsub("%s+$", ""):lower()
+  if normalized == "" then
+    return nil, "currency is required"
+  end
+
+  local balance = state.cash_accounts and state.cash_accounts[normalized] or nil
+  if balance == nil then
+    return nil, "cash account not found: " .. normalized
+  end
+
+  return {
+    currency = normalized,
+    balance = balance
+  }
+end
+
 function listings.list_patterns(state, opts)
   opts = opts or {}
   local rows = {}

@@ -20,6 +20,7 @@ describe("EventStore", function()
     dofile("src/scripts/core/reports.lua")
     dofile("src/scripts/core/schema.lua")
     dofile("src/scripts/core/costing.lua")
+    dofile("src/scripts/core/cash.lua")
     dofile("src/scripts/core/ledger.lua")
     dofile("src/scripts/core/storage/memory_event_store.lua")
     dofile("src/scripts/core/storage/sqlite_event_store.lua")
@@ -403,6 +404,7 @@ describe("EventStore", function()
     for _, event in ipairs(mem:read_all()) do
       sqlite:append({ event_type = event.event_type, payload = event.payload, ts = event.ts })
     end
+    sqlite:rebuild_projections()
 
     local mem2 = memory_store.new()
     local state2 = ledger.new(mem2)
@@ -418,7 +420,88 @@ describe("EventStore", function()
     assert.are.equal(report1.net_result_gold, report2.net_result_gold)
     assert.are.equal(500, year2.totals.process_revenue)
     assert.are.equal(95, year2.totals.process_total_cost)
+    assert.are.equal(0, year2.totals.process_basis_carried)
     assert.are.equal(405, year2.totals.process_net_result)
+    assert.are.equal(405, year2.totals.process_profit_contribution)
+    assert.are.equal(405, year2.totals.true_profit)
     assert.are.equal(0, inventory.get_qty(state2.inventory, "gold"))
+  end)
+
+  it("rebuild preserves immediate process write-offs and partial output basis", function()
+    if not luasql then
+      pending("LuaSQL sqlite3 not available")
+      return
+    end
+
+    local reports = _G.AchaeadexLedger.Core.Reports
+    local mem = memory_store.new()
+    local state1 = ledger.new(mem)
+
+    ledger.apply_opening_inventory(state1, "ore", 10, 10)
+    ledger.apply_process(state1, "smelt", { ore = 5 }, { metal = 3 }, 10, { year = 704 })
+
+    local db_path = os.tmpname()
+    local sqlite = sqlite_store.new(db_path)
+    for _, event in ipairs(mem:read_all()) do
+      sqlite:append({ event_type = event.event_type, payload = event.payload, ts = event.ts })
+    end
+
+    local mem2 = memory_store.new()
+    local state2 = ledger.new(mem2)
+    for _, event in ipairs(sqlite:read_all()) do
+      ledger.apply_event(state2, event)
+    end
+
+    local year2 = reports.year(state2, 704)
+
+    assert.are.equal(3, inventory.get_qty(state2.inventory, "metal"))
+    assert.are.equal(40 / 3, inventory.get_unit_cost(state2.inventory, "metal"))
+    assert.are.equal(1, #(state2.process_write_offs or {}))
+    assert.are.equal(20, state2.process_write_offs[1].amount_gold)
+    assert.are.equal(20, year2.totals.process_losses)
+    assert.are.equal(0, year2.totals.true_profit)
+  end)
+
+  it("rebuild preserves realized production revenue while capitalizing committed basis into outputs", function()
+    if not luasql then
+      pending("LuaSQL sqlite3 not available")
+      return
+    end
+
+    local reports = _G.AchaeadexLedger.Core.Reports
+    local mem = memory_store.new()
+    local state1 = ledger.new(mem)
+
+    ledger.apply_process_time_cost_rate(state1, 4781)
+    ledger.apply_process_time_cost_cutover(state1, "2026-03-01T00:00:00Z")
+    ledger.apply_opening_inventory(state1, "potash", 31, 1546 / 31)
+    ledger.apply_process(state1, "hunting", { potash = 31 }, { malachite = 939, realgar = 61, skins = 54 }, 0, nil, {
+      revenue_gold = 2790,
+      time_hours = 1,
+      completed_at = "2026-03-13T03:00:00Z"
+    })
+
+    local db_path = os.tmpname()
+    local sqlite = sqlite_store.new(db_path)
+    for _, event in ipairs(mem:read_all()) do
+      sqlite:append({ event_type = event.event_type, payload = event.payload, ts = event.ts })
+    end
+    sqlite:rebuild_projections()
+
+    local mem2 = memory_store.new()
+    local state2 = ledger.new(mem2)
+    for _, event in ipairs(sqlite:read_all()) do
+      ledger.apply_event(state2, event)
+    end
+
+    local process_id = next(state2.process_instances)
+    local report2 = reports.process(state2, process_id)
+    local overall2 = reports.overall(state2)
+
+    assert.are.equal(6327, report2.total_process_cost_gold)
+    assert.are.equal(6327, report2.capitalized_basis_gold)
+    assert.are.equal(2790, report2.net_result_gold)
+    assert.are.equal(2790, overall2.totals.process_net_result)
+    assert.are.equal(6327, overall2.totals.process_basis_carried)
   end)
 end)

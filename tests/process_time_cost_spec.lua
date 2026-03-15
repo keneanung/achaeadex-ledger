@@ -14,6 +14,7 @@ describe("Process time costs", function()
     dofile("src/scripts/core/pattern_pools.lua")
     dofile("src/scripts/core/production_sources.lua")
     dofile("src/scripts/core/recovery.lua")
+    dofile("src/scripts/core/cash.lua")
     dofile("src/scripts/core/ledger.lua")
     dofile("src/scripts/core/storage/memory_event_store.lua")
 

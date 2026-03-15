@@ -16,6 +16,10 @@
     "isActive": "yes"
   },
   {
+    "name": "cash",
+    "isActive": "yes"
+  },
+  {
     "name": "schema",
     "isActive": "yes"
   },

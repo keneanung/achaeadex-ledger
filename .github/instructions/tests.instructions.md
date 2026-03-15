@@ -85,6 +85,29 @@ Expected:
 - fee 4 is sunk
 - process instance status == aborted
 
+------------------------------------------------------------
+TEST 5B – CASH ACCOUNTS + CONVERSION
+------------------------------------------------------------
+
+Given:
+- CASH_INIT gold 100000
+- CASH_INIT credits 5
+Expected:
+- gold balance == 100000
+- credits balance == 5
+
+When:
+- CASH_ADJUST gold -500
+Expected:
+- gold balance == 99500
+
+When:
+- CURRENCY_CONVERT credits 1 -> gold 600
+Expected:
+- credits balance == 4
+- gold balance == 100100
+- no revenue/profit totals change because of conversion alone
+
 PROCESS TIME COST ADDENDUM
 ------------------------------------------------------------
 

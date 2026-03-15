@@ -14,6 +14,7 @@ describe("Ledger Core", function()
     dofile("src/scripts/core/production_sources.lua")
     dofile("src/scripts/core/recovery.lua")
     dofile("src/scripts/core/costing.lua")
+    dofile("src/scripts/core/cash.lua")
     dofile("src/scripts/core/ledger.lua")
     dofile("src/scripts/core/storage/memory_event_store.lua")
     
@@ -40,13 +41,66 @@ describe("Ledger Core", function()
       local store = memory_store.new()
       local state = ledger.new(store)
       
-      ledger.record_event(state, "TEST_EVENT", {foo = "bar", num = 123})
+      ledger.record_event(state, "OPENING_INVENTORY", {
+        commodity = "iron",
+        qty = 2,
+        unit_cost = 7
+      })
       
       local events = store:read_all()
       assert.are.equal(1, #events)
-      assert.are.equal("TEST_EVENT", events[1].event_type)
-      assert.are.equal("bar", events[1].payload.foo)
-      assert.are.equal(123, events[1].payload.num)
+      assert.are.equal("OPENING_INVENTORY", events[1].event_type)
+      assert.are.equal("iron", events[1].payload.commodity)
+      assert.are.equal(2, events[1].payload.qty)
+      assert.are.equal(7, events[1].payload.unit_cost)
+    end)
+
+    it("should reject malformed known events before persisting them", function()
+      local store = memory_store.new()
+      local state = ledger.new(store)
+
+      local ok, err = pcall(function()
+        ledger.record_event(state, "OPENING_INVENTORY", {
+          commodity = "ore",
+          qty = 1,
+          unit_cost = 10,
+          unexpected = true
+        })
+      end)
+
+      assert.is_false(ok)
+      assert.is_truthy(tostring(err):find("unsupported field", 1, true))
+      assert.are.equal(0, #store:read_all())
+    end)
+
+    it("should reject invalid event batches before persisting any events", function()
+      local store = memory_store.new()
+      local state = ledger.new(store)
+
+      local ok, err = pcall(function()
+        ledger.record_events(state, {
+          {
+            event_type = "OPENING_INVENTORY",
+            payload = {
+              commodity = "ore",
+              qty = 1,
+              unit_cost = 10
+            }
+          },
+          {
+            event_type = "OPENING_INVENTORY",
+            payload = {
+              commodity = "coal",
+              qty = "bad",
+              unit_cost = 1
+            }
+          }
+        })
+      end)
+
+      assert.is_false(ok)
+      assert.is_truthy(tostring(err):find("qty must be a number", 1, true))
+      assert.are.equal(0, #store:read_all())
     end)
   end)
   
@@ -227,6 +281,47 @@ describe("Ledger Core", function()
       assert.are.same({}, event.payload.inputs)
       assert.are.same({ token = 2 }, event.payload.outputs)
       assert.are.equal(30, event.payload.gold_fee)
+    end)
+
+    it("should allow immediate processes without outputs", function()
+      local store = memory_store.new()
+      local state = ledger.new(store)
+
+      ledger.apply_opening_inventory(state, "curatives", 5, 10)
+      ledger.apply_process(state, "hunting", { curatives = 2 }, nil, 0)
+
+      assert.are.equal(3, inventory.get_qty(state.inventory, "curatives"))
+      assert.are.equal(1, #(state.process_write_offs or {}))
+      assert.are.equal(20, state.process_write_offs[1].amount_gold)
+
+      local event = store.events[2]
+      assert.are.equal("PROCESS_APPLY", event.event_type)
+      assert.are.same({ curatives = 2 }, event.payload.inputs)
+      assert.are.same({}, event.payload.outputs)
+
+      local write_off_event = store.events[3]
+      assert.are.equal("PROCESS_WRITE_OFF", write_off_event.event_type)
+      assert.are.equal(20, write_off_event.payload.amount_gold)
+    end)
+
+    it("should write off the unrecovered remainder for immediate partial outputs", function()
+      local store = memory_store.new()
+      local state = ledger.new(store)
+
+      ledger.apply_opening_inventory(state, "ore", 10, 10)
+      ledger.apply_process(state, "smelt",
+        { ore = 5 },
+        { metal = 3 },
+        10)
+
+      assert.are.equal(3, inventory.get_qty(state.inventory, "metal"))
+      assert.are.equal(40 / 3, inventory.get_unit_cost(state.inventory, "metal"))
+      assert.are.equal(1, #(state.process_write_offs or {}))
+      assert.are.equal(20, state.process_write_offs[1].amount_gold)
+
+      local write_off_event = store.events[3]
+      assert.are.equal("PROCESS_WRITE_OFF", write_off_event.event_type)
+      assert.are.equal(20, write_off_event.payload.amount_gold)
     end)
 
     it("should treat gold outputs as inventory commodities unless revenue is explicit", function()

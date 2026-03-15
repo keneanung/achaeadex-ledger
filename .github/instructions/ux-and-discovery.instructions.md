@@ -24,7 +24,7 @@ Rules:
      - at least one example invocation
 2) Provide additional scoped help:
    - `adex help <topic>` where topic in:
-  inv, broker, pattern, design, source, item, order, process, craft, forge, augment, sell, report, list, price, config, maintenance
+  inv, broker, cash, pattern, design, source, item, order, process, craft, forge, augment, sell, report, list, price, config, maintenance
 3) Help text must be stable, concise, and actionable.
 
 ------------------------------------------------------------
@@ -101,6 +101,20 @@ Rules:
 - `adex list processes`
   - process_instance_id, process_id, status, started_at, completed_at
   - filters: --status, --process
+
+- `adex cash show [<currency>]`
+  - shows all known cash-account balances, or a single currency balance
+  - balances are liquidity assets, not inventory
+
+- `adex cash init <currency> <amount> [--note <text>]`
+  - initializes an opening balance for a currency
+  - opening balance is not revenue
+
+- `adex cash adjust <currency> <amount> [--reason <text>] [--note <text>]`
+  - records a manual cash reconciliation / correction
+
+- `adex cash convert <from_currency> <from_amount> <to_currency> <to_amount> [--note <text>]`
+  - transfers balance between currencies without creating profit
 
 - `adex process list --needs-year`
   - lists PROCESS_WRITE_OFF entries with unresolved game-year attribution

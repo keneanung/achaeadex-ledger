@@ -137,6 +137,42 @@ local function resolve_source_id(conn, source_id)
   return source_id
 end
 
+local function normalize_currency(currency)
+  local normalized = string.lower(tostring(currency or ""):gsub("^%s+", ""):gsub("%s+$", ""))
+  if normalized == "" then
+    error("currency must be a non-empty string")
+  end
+  return normalized
+end
+
+local function record_cash_movement(conn, ts, event_type, currency, amount, reason, note, source_event_id)
+  local integer = tonumber(amount) or 0
+  if integer == 0 then
+    return
+  end
+
+  local normalized = normalize_currency(currency)
+  exec_sql(conn, string.format(
+    "INSERT OR IGNORE INTO cash_accounts (currency, balance) VALUES (%s, 0)",
+    sql_value(normalized)
+  ))
+  exec_sql(conn, string.format(
+    "UPDATE cash_accounts SET balance = balance + %s WHERE currency = %s",
+    sql_value(integer),
+    sql_value(normalized)
+  ))
+  exec_sql(conn, string.format(
+    "INSERT INTO cash_movements (ts, event_type, currency, amount, reason, note, source_event_id) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+    sql_value(ts),
+    sql_value(event_type),
+    sql_value(normalized),
+    sql_value(integer),
+    sql_value(reason),
+    sql_value(note),
+    sql_value(source_event_id)
+  ))
+end
+
 local function ensure_stub_source(conn, source_id, bom, ts)
   if not source_id then
     return
@@ -285,6 +321,32 @@ function projector.apply(conn, event)
     return
   end
 
+  if event_type == "CASH_INIT" then
+    record_cash_movement(conn, ts, event_type, payload.currency, payload.amount, nil, payload.note, event.id)
+    return
+  end
+
+  if event_type == "CASH_ADJUST" then
+    record_cash_movement(conn, ts, event_type, payload.currency, payload.amount, payload.reason, payload.note, event.id)
+    return
+  end
+
+  if event_type == "CURRENCY_CONVERT" then
+    record_cash_movement(conn, ts, event_type, payload.from_currency, -(payload.from_amount or 0), nil, payload.note, event.id)
+    record_cash_movement(conn, ts, event_type, payload.to_currency, payload.to_amount or 0, nil, payload.note, event.id)
+    return
+  end
+
+  if event_type == "BROKER_BUY" then
+    record_cash_movement(conn, ts, event_type, "gold", -((payload.qty or 0) * (payload.unit_cost or 0)), nil, nil, event.id)
+    return
+  end
+
+  if event_type == "BROKER_SELL" then
+    record_cash_movement(conn, ts, event_type, "gold", payload.revenue or 0, nil, nil, event.id)
+    return
+  end
+
   if event_type == "DESIGN_START" then
     local json = get_json()
     local source_id, source_kind, source_type = normalize_source_payload(payload)
@@ -342,6 +404,7 @@ function projector.apply(conn, event)
       sql_value(payload.amount or 0),
       sql_value(source_id)
     ))
+    record_cash_movement(conn, ts, event_type, "gold", -(payload.amount or 0), payload.kind, nil, event.id)
     return
   end
 
@@ -461,6 +524,7 @@ function projector.apply(conn, event)
       sql_value(payload.capital_initial),
       sql_value("active")
     ))
+    record_cash_movement(conn, ts, event_type, "gold", -(payload.capital_initial or 0), nil, nil, event.id)
     return
   end
 
@@ -539,6 +603,8 @@ function projector.apply(conn, event)
       sql_value(payload.transform_kind or "augmentation"),
       sql_value(payload.crafted_at or ts)
     ))
+
+    record_cash_movement(conn, ts, event_type, "gold", -(payload.fee_gold or 0), nil, payload.note, event.id)
     return
   end
 
@@ -669,6 +735,8 @@ function projector.apply(conn, event)
         sql_value(event.id)
       ))
 
+      record_cash_movement(conn, ts, event_type, "gold", payload.sale_price_gold or 0, nil, nil, event.id)
+
       local item_row = fetch_one(conn, "SELECT source_id, source_kind, operational_cost_gold FROM crafted_items WHERE item_id = " .. sql_value(payload.item_id))
       if item_row and item_row.source_id then
         local op_profit = (payload.sale_price_gold or 0) - (tonumber(item_row.operational_cost_gold) or 0)
@@ -757,6 +825,7 @@ function projector.apply(conn, event)
       sql_value(payload.note),
       sql_value(payload.passive or 0)
     ))
+    record_cash_movement(conn, ts, event_type, "gold", -(payload.gold_fee or 0), nil, payload.note, event.id)
     return
   end
 
@@ -775,6 +844,8 @@ function projector.apply(conn, event)
         sql_value(payload.passive or 0)
       ))
     end
+    record_cash_movement(conn, ts, event_type, "gold", -(payload.gold_fee or 0), nil, payload.note, event.id)
+    record_cash_movement(conn, ts, event_type, "gold", payload.revenue_gold or 0, nil, payload.note, event.id)
     return
   end
 
@@ -785,6 +856,9 @@ function projector.apply(conn, event)
         sql_value(payload.note),
         sql_value(payload.process_instance_id)
       ))
+    end
+    if event_type == "PROCESS_ADD_FEE" then
+      record_cash_movement(conn, ts, event_type, "gold", -(payload.gold_fee or 0), nil, payload.note, event.id)
     end
     return
   end
@@ -797,6 +871,7 @@ function projector.apply(conn, event)
       sql_value(payload.note),
       sql_value(payload.process_instance_id)
     ))
+    record_cash_movement(conn, ts, event_type, "gold", payload.revenue_gold or 0, nil, payload.note, event.id)
     return
   end
 
@@ -822,6 +897,7 @@ function projector.apply(conn, event)
       sql_value(payload.note),
       sql_value(payload.process_instance_id)
     ))
+    record_cash_movement(conn, ts, event_type, "gold", payload.revenue_gold or 0, nil, payload.note, event.id)
     return
   end
 
@@ -896,6 +972,8 @@ end
 
 function projector.truncate_domains(conn)
   local tables = {
+    "cash_movements",
+    "cash_accounts",
     "process_time_costs",
     "forge_write_offs",
     "item_transformations",

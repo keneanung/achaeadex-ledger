@@ -15,3 +15,11 @@ Required coverage:
 - Rebuild preserves passive state and time-cost outcomes.
 - Shared costing helpers use deterministic `ceil(elapsed_seconds * rate / 3600)` rounding.
 - Standardized breakdown keys are present where applicable.
+
+Cash coverage:
+- `CASH_INIT` initializes opening balances without affecting profit.
+- Multiple currencies are tracked independently.
+- `CASH_ADJUST` applies signed balance corrections.
+- `CURRENCY_CONVERT` debits one cash account and credits another without creating profit.
+- Rebuild preserves `cash_accounts` balances deterministically.
+- Cash remains separate from commodity inventory and WAC.

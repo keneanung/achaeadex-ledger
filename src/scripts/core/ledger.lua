@@ -76,6 +76,16 @@ local function get_costing()
   return _G.AchaeadexLedger.Core.Costing
 end
 
+local function get_cash()
+  if not _G.AchaeadexLedger
+    or not _G.AchaeadexLedger.Core
+    or not _G.AchaeadexLedger.Core.Cash then
+    error("AchaeadexLedger.Core.Cash is not loaded")
+  end
+
+  return _G.AchaeadexLedger.Core.Cash
+end
+
 local function require_event_store(state)
   if not state.event_store then
     error("EventStore is required on ledger state")
@@ -338,11 +348,368 @@ local function total_process_output_qty(outputs)
   return total
 end
 
+local function process_input_stats(inputs)
+  local committed_qty = 0
+  local commodity_count = 0
+
+  for _, qty in pairs(inputs or {}) do
+    local normalized = tonumber(qty) or 0
+    if normalized > 0 then
+      committed_qty = committed_qty + normalized
+      commodity_count = commodity_count + 1
+    end
+  end
+
+  return committed_qty, commodity_count
+end
+
+local function process_output_basis(material_basis, fee_basis, committed_qty, commodity_count, output_qty)
+  local material_total = tonumber(material_basis) or 0
+  local fee_total = tonumber(fee_basis) or 0
+  local total_output_qty = tonumber(output_qty) or 0
+
+  if total_output_qty <= 0 or (material_total + fee_total) <= 0 then
+    return 0
+  end
+
+  if commodity_count == 0 or committed_qty <= 0 then
+    return material_total + fee_total
+  end
+
+  if commodity_count > 1 then
+    return material_total + fee_total
+  end
+
+  local ratio = total_output_qty / committed_qty
+  if ratio > 1 then
+    ratio = 1
+  end
+
+  return (material_total * ratio) + fee_total
+end
+
+local function process_basis_summary(material_basis, fee_basis, committed_qty, commodity_count, output_qty)
+  local committed_basis = (tonumber(material_basis) or 0) + (tonumber(fee_basis) or 0)
+  local output_basis = process_output_basis(material_basis, fee_basis, committed_qty, commodity_count, output_qty)
+  local process_loss = committed_basis - output_basis
+
+  return committed_basis, output_basis, process_loss
+end
+
+local function deep_copy(value, seen)
+  if type(value) ~= "table" then
+    return value
+  end
+
+  seen = seen or {}
+  if seen[value] then
+    return seen[value]
+  end
+
+  local copy = {}
+  seen[value] = copy
+  for key, item in pairs(value) do
+    if key ~= "event_store" then
+      copy[deep_copy(key, seen)] = deep_copy(item, seen)
+    end
+  end
+  return copy
+end
+
+local function validate_iso8601_utc(value, field_name)
+  if type(value) ~= "string" or not value:match("^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%dZ$") then
+    error((field_name or "value") .. " must be an ISO-8601 UTC timestamp")
+  end
+end
+
+local function validate_number(value, field_name)
+  if type(value) ~= "number" then
+    error((field_name or "value") .. " must be a number")
+  end
+end
+
+local function validate_non_negative_number(value, field_name)
+  validate_number(value, field_name)
+  if value < 0 then
+    error((field_name or "value") .. " must be non-negative")
+  end
+end
+
+local function validate_integer(value, field_name)
+  validate_number(value, field_name)
+  if math.floor(value) ~= value then
+    error((field_name or "value") .. " must be an integer")
+  end
+end
+
+local function validate_non_negative_integer(value, field_name)
+  validate_integer(value, field_name)
+  if value < 0 then
+    error((field_name or "value") .. " must be non-negative")
+  end
+end
+
+local function validate_string(value, field_name)
+  if type(value) ~= "string" then
+    error((field_name or "value") .. " must be a string")
+  end
+end
+
+local function validate_flag(value, field_name)
+  validate_integer(value, field_name)
+  if value ~= 0 and value ~= 1 then
+    error((field_name or "value") .. " must be 0 or 1")
+  end
+end
+
+local function validate_qty_map(value, field_name)
+  if type(value) ~= "table" then
+    error((field_name or "value") .. " must be a table")
+  end
+  for commodity, qty in pairs(value) do
+    if type(commodity) ~= "string" or commodity == "" then
+      error((field_name or "value") .. " commodity keys must be non-empty strings")
+    end
+    validate_non_negative_number(qty, (field_name or "value") .. "." .. commodity)
+  end
+end
+
+local function validate_string_map(value, field_name)
+  if type(value) ~= "table" then
+    error((field_name or "value") .. " must be a table")
+  end
+  for key, item in pairs(value) do
+    if type(key) ~= "string" or key == "" then
+      error((field_name or "value") .. " keys must be non-empty strings")
+    end
+    validate_string(item, (field_name or "value") .. "." .. key)
+  end
+end
+
+local function validate_game_time(value, field_name)
+  if type(value) ~= "table" then
+    error((field_name or "game_time") .. " must be a table")
+  end
+  local allowed = {
+    year = true,
+    month = true,
+    day = true,
+    hour = true,
+    minute = true
+  }
+  for key, item in pairs(value) do
+    if not allowed[key] then
+      error((field_name or "game_time") .. " contains unsupported field: " .. tostring(key))
+    end
+    validate_integer(item, (field_name or "game_time") .. "." .. key)
+  end
+  if value.year ~= nil then
+    validate_integer(value.year, (field_name or "game_time") .. ".year")
+  end
+end
+
+local function validate_disposition(value, field_name)
+  if type(value) ~= "table" then
+    error((field_name or "disposition") .. " must be a table")
+  end
+  local allowed = {
+    returned = true,
+    lost = true,
+    outputs = true
+  }
+  for key, item in pairs(value) do
+    if not allowed[key] then
+      error((field_name or "disposition") .. " contains unsupported field: " .. tostring(key))
+    end
+    validate_qty_map(item, (field_name or "disposition") .. "." .. key)
+  end
+end
+
+local function require_one_of(payload, fields, event_type)
+  for _, field_name in ipairs(fields) do
+    if payload[field_name] ~= nil then
+      return
+    end
+  end
+  error(event_type .. " payload must include one of: " .. table.concat(fields, ", "))
+end
+
+local function payload_spec(required, optional, custom)
+  return {
+    required = required or {},
+    optional = optional or {},
+    custom = custom
+  }
+end
+
+local EVENT_PAYLOAD_SPECS = {
+  OPENING_INVENTORY = payload_spec({ commodity = validate_string, qty = validate_non_negative_number, unit_cost = validate_non_negative_number }, { game_time = validate_game_time }),
+  CASH_INIT = payload_spec({ currency = validate_string, amount = validate_non_negative_integer }, { note = validate_string }),
+  CASH_ADJUST = payload_spec({ currency = validate_string, amount = validate_integer }, { reason = validate_string, note = validate_string }),
+  CURRENCY_CONVERT = payload_spec({ from_currency = validate_string, from_amount = validate_non_negative_integer, to_currency = validate_string, to_amount = validate_non_negative_integer }, { note = validate_string }, function(payload)
+    if payload.from_currency == payload.to_currency then
+      error("CURRENCY_CONVERT payload must use different currencies")
+    end
+  end),
+  BROKER_BUY = payload_spec({ commodity = validate_string, qty = validate_non_negative_number, unit_cost = validate_non_negative_number }, { game_time = validate_game_time }),
+  BROKER_SELL = payload_spec({ commodity = validate_string, qty = validate_non_negative_number, unit_price = validate_non_negative_number, cost = validate_number, revenue = validate_number, profit = validate_number }, { sale_id = validate_string, sold_at = validate_iso8601_utc, order_id = validate_string, game_time = validate_game_time }),
+  PROCESS_APPLY = payload_spec({ process_id = validate_string }, { process_instance_id = validate_string, inputs = validate_qty_map, outputs = validate_qty_map, revenue_gold = validate_non_negative_number, gold_fee = validate_non_negative_number, time_cost_gold = validate_non_negative_number, elapsed_seconds = validate_non_negative_integer, rate_gold_per_hour = validate_non_negative_number, passive = validate_flag, started_at = validate_iso8601_utc, completed_at = validate_iso8601_utc, note = validate_string, cost_breakdown_json = validate_string, game_time = validate_game_time }),
+  PROCESS_START = payload_spec({ process_instance_id = validate_string, process_id = validate_string }, { inputs = validate_qty_map, gold_fee = validate_non_negative_number, passive = validate_flag, note = validate_string, started_at = validate_iso8601_utc, game_time = validate_game_time }),
+  PROCESS_ADD_INPUTS = payload_spec({ process_instance_id = validate_string, inputs = validate_qty_map }, { note = validate_string, game_time = validate_game_time }),
+  PROCESS_ADD_FEE = payload_spec({ process_instance_id = validate_string, gold_fee = validate_non_negative_number }, { note = validate_string, game_time = validate_game_time }),
+  PROCESS_ADD_TIME_COST = payload_spec({ process_instance_id = validate_string, amount_gold = validate_non_negative_number, elapsed_seconds = validate_non_negative_integer, rate_gold_per_hour = validate_non_negative_number, reason = validate_string }, { note = validate_string, game_time = validate_game_time }),
+  PROCESS_COMPLETE = payload_spec({ process_instance_id = validate_string }, { outputs = validate_qty_map, revenue_gold = validate_non_negative_number, note = validate_string, completed_at = validate_iso8601_utc, game_time = validate_game_time }),
+  PROCESS_ABORT = payload_spec({ process_instance_id = validate_string, disposition = validate_disposition }, { revenue_gold = validate_non_negative_number, note = validate_string, completed_at = validate_iso8601_utc, game_time = validate_game_time }),
+  PROCESS_WRITE_OFF = payload_spec({ process_instance_id = validate_string, amount_gold = validate_non_negative_number }, { game_time = validate_game_time, reason = validate_string, note = validate_string }),
+  PROCESS_SET_TIME_COST_RATE = payload_spec({ rate_gold_per_hour = validate_non_negative_number }),
+  PROCESS_SET_TIME_COST_CUTOVER = payload_spec({ enabled_from_ts = validate_iso8601_utc }),
+  PROCESS_SET_GAME_TIME = payload_spec({ process_instance_id = validate_string, scope = validate_string, game_time = validate_game_time }, { note = validate_string }),
+  DESIGN_START = payload_spec({}, { source_id = validate_string, design_id = validate_string, source_type = validate_string, design_type = validate_string, name = validate_string, provenance = validate_string, recovery_enabled = validate_flag, pattern_pool_id = validate_string, status = validate_string, bom = validate_qty_map, pricing_policy = function(value) if type(value) ~= "table" then error("pricing_policy must be a table") end end, created_at = validate_iso8601_utc }, function(payload)
+    require_one_of(payload, { "source_id", "design_id" }, "DESIGN_START")
+    require_one_of(payload, { "source_type", "design_type" }, "DESIGN_START")
+  end),
+  DESIGN_UPDATE = payload_spec({}, { source_id = validate_string, design_id = validate_string, source_type = validate_string, design_type = validate_string, name = validate_string, provenance = validate_string, recovery_enabled = validate_flag, status = validate_string, pattern_pool_id = validate_string, metadata = function(value) if type(value) ~= "table" then error("metadata must be a table") end end }, function(payload)
+    require_one_of(payload, { "source_id", "design_id" }, "DESIGN_UPDATE")
+  end),
+  DESIGN_COST = payload_spec({ amount = validate_non_negative_number }, { source_id = validate_string, design_id = validate_string, kind = validate_string, game_time = validate_game_time }, function(payload)
+    require_one_of(payload, { "source_id", "design_id" }, "DESIGN_COST")
+  end),
+  DESIGN_SET_PER_ITEM_FEE = payload_spec({ amount = validate_non_negative_number }, { source_id = validate_string, design_id = validate_string, game_time = validate_game_time }, function(payload)
+    require_one_of(payload, { "source_id", "design_id" }, "DESIGN_SET_PER_ITEM_FEE")
+  end),
+  DESIGN_SET_BOM = payload_spec({ bom = validate_qty_map }, { source_id = validate_string, design_id = validate_string }, function(payload)
+    require_one_of(payload, { "source_id", "design_id" }, "DESIGN_SET_BOM")
+  end),
+  DESIGN_SET_PRICING = payload_spec({ pricing_policy = function(value) if type(value) ~= "table" then error("pricing_policy must be a table") end end }, { source_id = validate_string, design_id = validate_string }, function(payload)
+    require_one_of(payload, { "source_id", "design_id" }, "DESIGN_SET_PRICING")
+  end),
+  DESIGN_REGISTER_ALIAS = payload_spec({ alias_id = validate_string, alias_kind = validate_string, active = validate_flag }, { source_id = validate_string, design_id = validate_string }, function(payload)
+    require_one_of(payload, { "source_id", "design_id" }, "DESIGN_REGISTER_ALIAS")
+  end),
+  DESIGN_REGISTER_APPEARANCE = payload_spec({ appearance_key = validate_string, confidence = validate_string }, { source_id = validate_string, design_id = validate_string }, function(payload)
+    require_one_of(payload, { "source_id", "design_id" }, "DESIGN_REGISTER_APPEARANCE")
+  end),
+  SOURCE_CREATE = payload_spec({ source_id = validate_string, source_kind = validate_string, source_type = validate_string }, { name = validate_string, provenance = validate_string, recovery_enabled = validate_flag, status = validate_string, per_item_fee_gold = validate_non_negative_number, metadata = function(value) if type(value) ~= "table" then error("metadata must be a table") end end, created_at = validate_iso8601_utc, bom = validate_qty_map, pricing_policy = function(value) if type(value) ~= "table" then error("pricing_policy must be a table") end end, capital_remaining_gold = validate_non_negative_number }),
+  PATTERN_ACTIVATE = payload_spec({ pattern_pool_id = validate_string, pattern_type = validate_string, capital_initial = validate_non_negative_number, activated_at = validate_iso8601_utc }, { pattern_name = validate_string }),
+  PATTERN_DEACTIVATE = payload_spec({ pattern_pool_id = validate_string, deactivated_at = validate_iso8601_utc }),
+  ORDER_CREATE = payload_spec({ order_id = validate_string }, { created_at = validate_iso8601_utc, customer = validate_string, note = validate_string, status = validate_string }),
+  ORDER_ADD_SALE = payload_spec({ order_id = validate_string, sale_id = validate_string }, { game_time = validate_game_time }),
+  ORDER_ADD_ITEM = payload_spec({ order_id = validate_string, item_id = validate_string }, { game_time = validate_game_time }),
+  ORDER_SETTLE = payload_spec({ settlement_id = validate_string, order_id = validate_string, amount_gold = validate_non_negative_integer, method = validate_string, received_at = validate_iso8601_utc }, { game_time = validate_game_time }),
+  ORDER_CLOSE = payload_spec({ order_id = validate_string }, { closed_at = validate_iso8601_utc, status = validate_string }),
+  LEDGER_SET_DEFAULT_GAME_YEAR = payload_spec({ effective_from_event_id = validate_non_negative_integer, default_year = validate_integer }, { set_at = validate_iso8601_utc, note = validate_string }),
+  ITEM_REGISTER_EXTERNAL = payload_spec({ item_id = validate_string, acquired_at = validate_iso8601_utc, basis_gold = validate_non_negative_number, basis_source = validate_string }, { name = validate_string, status = validate_string, note = validate_string, game_time = validate_game_time }),
+  ITEM_UPDATE_EXTERNAL = payload_spec({ item_id = validate_string }, { name = validate_string, basis_gold = validate_non_negative_number, basis_source = validate_string, status = validate_string, note = validate_string, game_time = validate_game_time }),
+  CRAFT_ITEM = payload_spec({ item_id = validate_string, operational_cost_gold = validate_non_negative_number }, { source_id = validate_string, design_id = validate_string, source_kind = validate_string, appearance_key = validate_string, base_operational_cost_gold = validate_non_negative_number, forge_allocated_coal_gold = validate_non_negative_number, cost_breakdown_json = validate_string, crafted_at = validate_iso8601_utc, game_time = validate_game_time, materials = validate_qty_map, materials_source = validate_string, materials_cost_gold = validate_non_negative_number, parent_item_id = validate_string, transformed = validate_flag }, nil),
+  CRAFT_RESOLVE_SOURCE = payload_spec({ item_id = validate_string }, { source_id = validate_string, design_id = validate_string, source_kind = validate_string, reason = validate_string }, function(payload)
+    require_one_of(payload, { "source_id", "design_id" }, "CRAFT_RESOLVE_SOURCE")
+  end),
+  CRAFT_RESOLVE_DESIGN = payload_spec({ item_id = validate_string, design_id = validate_string }, { source_kind = validate_string, reason = validate_string }),
+  SELL_ITEM = payload_spec({}, { sale_id = validate_string, item_id = validate_string, sale_price_gold = validate_number, sold_at = validate_iso8601_utc, game_time = validate_game_time, settlement_id = validate_string, design_id = validate_string, source_id = validate_string, operational_profit = validate_number }, function(payload)
+    local has_sale_shape = payload.sale_id ~= nil or payload.item_id ~= nil or payload.sale_price_gold ~= nil or payload.sold_at ~= nil
+    local has_recovery_shape = payload.operational_profit ~= nil and (payload.design_id ~= nil or payload.source_id ~= nil)
+    if not has_sale_shape and not has_recovery_shape then
+      error("SELL_ITEM payload must describe a sale or recovery-only adjustment")
+    end
+    if has_sale_shape then
+      if payload.sale_id == nil or payload.item_id == nil or payload.sale_price_gold == nil or payload.sold_at == nil then
+        error("SELL_ITEM sale payload requires sale_id, item_id, sale_price_gold, and sold_at")
+      end
+    end
+  end),
+  FORGE_FIRE = payload_spec({ forge_session_id = validate_string, source_id = validate_string, started_at = validate_iso8601_utc, coal_basis_gold = validate_non_negative_number }, { expires_at = validate_iso8601_utc, coal_cost_explicit = validate_flag, status = validate_string, allocated_total_gold = validate_non_negative_number, note = validate_string, game_time = validate_game_time }),
+  FORGE_ATTACH_ITEM = payload_spec({ forge_session_id = validate_string, item_id = validate_string }, { allocated_coal_gold = validate_non_negative_number, note = validate_string, game_time = validate_game_time }),
+  FORGE_ALLOCATE = payload_spec({ forge_session_id = validate_string, method = validate_string, allocations = validate_qty_map, session_total_gold = validate_non_negative_number, computed_over = validate_qty_map, item_breakdowns = validate_string_map }, { game_time = validate_game_time }),
+  FORGE_CLOSE = payload_spec({ forge_session_id = validate_string, status = validate_string, method = validate_string, closed_at = validate_iso8601_utc }, { note = validate_string, game_time = validate_game_time }),
+  FORGE_EXPIRE = payload_spec({ forge_session_id = validate_string, status = validate_string, method = validate_string, closed_at = validate_iso8601_utc }, { note = validate_string, game_time = validate_game_time }),
+  FORGE_WRITE_OFF = payload_spec({ forge_session_id = validate_string, amount_gold = validate_non_negative_number, reason = validate_string }, { note = validate_string, game_time = validate_game_time }),
+  AUGMENT_ITEM = payload_spec({ new_item_id = validate_string, source_id = validate_string, target_item_id = validate_string, operational_cost_gold = validate_non_negative_number, crafted_at = validate_iso8601_utc }, { source_kind = validate_string, source_type = validate_string, target_item_kind = validate_string, appearance_key = validate_string, materials = validate_qty_map, materials_source = validate_string, materials_cost_gold = validate_non_negative_number, cost_breakdown_json = validate_string, fee_gold = validate_non_negative_number, time_cost_gold = validate_non_negative_number, transform_kind = validate_string, note = validate_string, game_time = validate_game_time })
+}
+
+local function normalize_payload_for_validation(event_type, payload)
+  if event_type == "CRAFT_ITEM" and payload.breakdown_json ~= nil and payload.cost_breakdown_json == nil then
+    payload.cost_breakdown_json = payload.breakdown_json
+    payload.breakdown_json = nil
+  end
+end
+
+local function validate_known_event_payload(event_type, payload)
+  local spec = EVENT_PAYLOAD_SPECS[event_type]
+  if not spec then
+    return false
+  end
+
+  normalize_payload_for_validation(event_type, payload)
+
+  local allowed = {}
+  for field_name in pairs(spec.required or {}) do
+    allowed[field_name] = true
+  end
+  for field_name in pairs(spec.optional or {}) do
+    allowed[field_name] = true
+  end
+
+  for field_name in pairs(payload) do
+    if not allowed[field_name] then
+      error(event_type .. " payload contains unsupported field: " .. tostring(field_name))
+    end
+  end
+
+  for field_name, validator in pairs(spec.required or {}) do
+    if payload[field_name] == nil then
+      error(event_type .. " payload is missing required field: " .. field_name)
+    end
+    validator(payload[field_name], field_name)
+  end
+
+  for field_name, validator in pairs(spec.optional or {}) do
+    if payload[field_name] ~= nil then
+      validator(payload[field_name], field_name)
+    end
+  end
+
+  if spec.custom then
+    spec.custom(payload)
+  end
+
+  return true
+end
+
+local function validate_event_sequence(state, events)
+  local shadow = deep_copy(state)
+  for _, event in ipairs(events) do
+    if not EVENT_PAYLOAD_SPECS[event.event_type] then
+      error("Unknown event type: " .. tostring(event.event_type))
+    end
+    validate_known_event_payload(event.event_type, event.payload)
+    local ok, err = pcall(ledger.apply_event, shadow, event)
+    if not ok then
+      error(err)
+    end
+  end
+end
+
 local function item_base_cost(item)
   if item.base_operational_cost_gold ~= nil then
     return item.base_operational_cost_gold
   end
   return (item.operational_cost_gold or 0) - (item.forge_allocated_coal_gold or 0)
+end
+
+local function apply_cash_adjustment(state, event_type, currency, amount, event, opts)
+  local integer = tonumber(amount) or 0
+  if integer == 0 then
+    return
+  end
+
+  local cash = get_cash()
+  cash.adjust(state, currency, integer, {
+    event_type = event_type,
+    note = opts and opts.note or nil,
+    reason = opts and opts.reason or nil,
+    ts = event and event.ts or nil,
+    source_event_id = event and event.id or nil
+  })
 end
 
 local function compute_material_breakdown(state, materials)
@@ -387,6 +754,9 @@ function ledger.new(event_store)
     order_items = {}, -- order_id -> { item_id = true }
     item_orders = {}, -- item_id -> order_id
     order_settlements = {}, -- settlement_id -> settlement data
+    cash_accounts = {}, -- currency -> balance
+    cash_movements = {}, -- ordered cash movement rows
+    cash_movement_counter = 0,
     process_write_offs = {}, -- list of write-off entries
     process_game_time_overrides = {}, -- process_instance_id -> { scope -> { game_time, updated_at, note } }
     process_time_cost_gold_per_hour = 0,
@@ -411,6 +781,8 @@ function ledger.record_event(state, event_type, payload)
     ts = os.date("!%Y-%m-%dT%H:%M:%SZ")
   }
 
+  validate_event_sequence(state, { event })
+
   if type(state.event_store.append_event_and_apply) == "function" then
     event.id = state.event_store:append_event_and_apply(event)
   else
@@ -423,6 +795,15 @@ end
 function ledger.record_events(state, events)
   require_event_store(state)
   assert(type(events) == "table", "events must be a table")
+
+  for _, event in ipairs(events) do
+    assert(type(event) == "table", "event must be a table")
+    assert(type(event.event_type) == "string", "event_type must be a string")
+    assert(type(event.payload) == "table", "payload must be a table")
+    event.ts = event.ts or os.date("!%Y-%m-%dT%H:%M:%SZ")
+  end
+
+  validate_event_sequence(state, events)
 
   if type(state.event_store.append_events_and_apply) == "function" then
     state.event_store:append_events_and_apply(events)
@@ -446,9 +827,11 @@ function ledger.apply_event(state, event)
   elseif event_type == "BROKER_BUY" then
     local inventory = get_inventory()
     inventory.add(state.inventory, payload.commodity, payload.qty, payload.unit_cost)
+    apply_cash_adjustment(state, event_type, "gold", -((payload.qty or 0) * (payload.unit_cost or 0)), event)
   elseif event_type == "BROKER_SELL" then
     local inventory = get_inventory()
     inventory.remove(state.inventory, payload.commodity, payload.qty)
+    apply_cash_adjustment(state, event_type, "gold", payload.revenue or 0, event)
     if payload.sale_id then
       local resolved_game_year = resolve_event_game_year(state, event, payload)
       state.commodity_sales[payload.sale_id] = {
@@ -490,15 +873,25 @@ function ledger.apply_event(state, event)
       total_input_cost = total_input_cost + cost
     end
 
-    local total_cost = total_input_cost + gold_fee + time_cost_gold
+    local committed_qty, commodity_count = process_input_stats(inputs)
+    local _, output_basis = process_basis_summary(
+      total_input_cost,
+      gold_fee + time_cost_gold,
+      committed_qty,
+      commodity_count,
+      total_output_qty
+    )
     local output_unit_cost = 0
     if total_output_qty > 0 then
-      output_unit_cost = total_cost / total_output_qty
+      output_unit_cost = output_basis / total_output_qty
     end
 
     for commodity, qty in pairs(outputs) do
       inventory.add(state.inventory, commodity, qty, output_unit_cost)
     end
+
+    apply_cash_adjustment(state, event_type, "gold", -(gold_fee or 0), event)
+    apply_cash_adjustment(state, event_type, "gold", revenue_gold, event)
 
     if process_instance_id then
       state.process_instances[process_instance_id] = {
@@ -535,13 +928,17 @@ function ledger.apply_event(state, event)
     if passive == nil then
       passive = default_process_passive(state, payload.started_at or event.ts)
     end
-    return deferred.start(state, payload.process_instance_id, payload.process_id, payload.inputs, payload.gold_fee, payload.note, payload.started_at, passive)
+    local instance = deferred.start(state, payload.process_instance_id, payload.process_id, payload.inputs, payload.gold_fee, payload.note, payload.started_at, passive)
+    apply_cash_adjustment(state, event_type, "gold", -(payload.gold_fee or 0), event)
+    return instance
   elseif event_type == "PROCESS_ADD_INPUTS" then
     local deferred = get_deferred()
     return deferred.add_inputs(state, payload.process_instance_id, payload.inputs, payload.note)
   elseif event_type == "PROCESS_ADD_FEE" then
     local deferred = get_deferred()
-    return deferred.add_fee(state, payload.process_instance_id, payload.gold_fee, payload.note)
+    local instance = deferred.add_fee(state, payload.process_instance_id, payload.gold_fee, payload.note)
+    apply_cash_adjustment(state, event_type, "gold", -(payload.gold_fee or 0), event)
+    return instance
   elseif event_type == "PROCESS_ADD_TIME_COST" then
     local deferred = get_deferred()
     return deferred.add_time_cost(state, payload.process_instance_id, payload.amount_gold, payload.elapsed_seconds, payload.rate_gold_per_hour, payload.note)
@@ -556,6 +953,7 @@ function ledger.apply_event(state, event)
       process_scope = "complete"
     })
     instance._revenue_event_id = event.id
+    apply_cash_adjustment(state, event_type, "gold", instance.revenue_gold, event)
     return instance
   elseif event_type == "PROCESS_ABORT" then
     local deferred = get_deferred()
@@ -568,7 +966,33 @@ function ledger.apply_event(state, event)
       process_scope = "abort"
     })
     instance._revenue_event_id = event.id
+    apply_cash_adjustment(state, event_type, "gold", instance.revenue_gold, event)
     return instance
+  elseif event_type == "CASH_INIT" then
+    local cash = get_cash()
+    cash.init(state, payload.currency, payload.amount, {
+      note = payload.note,
+      ts = event.ts,
+      source_event_id = event.id
+    })
+    return state
+  elseif event_type == "CASH_ADJUST" then
+    local cash = get_cash()
+    cash.adjust(state, payload.currency, payload.amount, {
+      reason = payload.reason,
+      note = payload.note,
+      ts = event.ts,
+      source_event_id = event.id
+    })
+    return state
+  elseif event_type == "CURRENCY_CONVERT" then
+    local cash = get_cash()
+    cash.convert(state, payload.from_currency, payload.from_amount, payload.to_currency, payload.to_amount, {
+      note = payload.note,
+      ts = event.ts,
+      source_event_id = event.id
+    })
+    return state
   elseif event_type == "PROCESS_WRITE_OFF" then
     local resolved_game_year = resolve_event_game_year(state, event, payload, {
       process_instance_id = payload.process_instance_id,
@@ -655,6 +1079,7 @@ function ledger.apply_event(state, event)
     local sources = get_sources()
     local source_id = resolve_source_id(state, payload.source_id or payload.design_id)
     sources.add_capital(state, source_id, payload.amount)
+    apply_cash_adjustment(state, event_type, "gold", -(payload.amount or 0), event)
   elseif event_type == "DESIGN_SET_PER_ITEM_FEE" then
     local source_id = resolve_source_id(state, payload.source_id or payload.design_id)
     state.production_sources[source_id].per_item_fee_gold = payload.amount
@@ -683,6 +1108,7 @@ function ledger.apply_event(state, event)
   elseif event_type == "PATTERN_ACTIVATE" then
     local pattern_pools = get_pattern_pools()
     pattern_pools.activate(state, payload.pattern_pool_id, payload.pattern_type, payload.pattern_name, payload.capital_initial, payload.activated_at)
+    apply_cash_adjustment(state, event_type, "gold", -(payload.capital_initial or 0), event)
   elseif event_type == "PATTERN_DEACTIVATE" then
     local pattern_pools = get_pattern_pools()
     pattern_pools.deactivate(state, payload.pattern_pool_id, payload.deactivated_at)
@@ -886,6 +1312,7 @@ function ledger.apply_event(state, event)
       _event_id = event.id
     }
     state.sales[payload.sale_id] = sale
+    apply_cash_adjustment(state, event_type, "gold", payload.sale_price_gold or 0, event)
 
     local operational_profit = payload.sale_price_gold - item_basis
     if item and item.source_id then
@@ -1039,6 +1466,8 @@ function ledger.apply_event(state, event)
       transformed = 0
     }
 
+    apply_cash_adjustment(state, event_type, "gold", -(payload.fee_gold or 0), event)
+
     state.item_transformations[payload.new_item_id] = {
       new_item_id = payload.new_item_id,
       old_item_id = payload.target_item_id,
@@ -1059,6 +1488,39 @@ function ledger.apply_opening_inventory(state, commodity, qty, unit_cost, game_t
     qty = qty,
     unit_cost = unit_cost,
     game_time = game_time
+  })
+  ledger.apply_event(state, event)
+  return state
+end
+
+function ledger.apply_cash_init(state, currency, amount, note)
+  local event = ledger.record_event(state, "CASH_INIT", {
+    currency = currency,
+    amount = amount,
+    note = note
+  })
+  ledger.apply_event(state, event)
+  return state
+end
+
+function ledger.apply_cash_adjust(state, currency, amount, reason, note)
+  local event = ledger.record_event(state, "CASH_ADJUST", {
+    currency = currency,
+    amount = amount,
+    reason = reason,
+    note = note
+  })
+  ledger.apply_event(state, event)
+  return state
+end
+
+function ledger.apply_currency_convert(state, from_currency, from_amount, to_currency, to_amount, note)
+  local event = ledger.record_event(state, "CURRENCY_CONVERT", {
+    from_currency = from_currency,
+    from_amount = from_amount,
+    to_currency = to_currency,
+    to_amount = to_amount,
+    note = note
   })
   ledger.apply_event(state, event)
   return state
@@ -1108,6 +1570,8 @@ end
 -- Process immediate PROCESS_APPLY event
 function ledger.apply_process(state, process_id, inputs, outputs, gold_fee, game_time, opts)
   opts = opts or {}
+  inputs = inputs or {}
+  outputs = outputs or {}
 
   local completed_at = opts.completed_at or os.date("!%Y-%m-%dT%H:%M:%SZ")
   local elapsed_seconds = tonumber(opts.elapsed_seconds)
@@ -1128,7 +1592,7 @@ function ledger.apply_process(state, process_id, inputs, outputs, gold_fee, game
     time_cost = costing.compute_time_cost(elapsed_seconds, rate_gold_per_hour).amount_gold
   end
 
-  local materials_cost = compute_material_cost(state, inputs or {})
+  local materials_cost = compute_material_cost(state, inputs)
   local process_instance_id = opts.process_instance_id
   local revenue_gold = tonumber(opts.revenue_gold) or 0
   if not process_instance_id then
@@ -1146,6 +1610,15 @@ function ledger.apply_process(state, process_id, inputs, outputs, gold_fee, game
     outputs = outputs,
     passive = passive == 1
   })
+
+  local committed_qty, commodity_count = process_input_stats(inputs)
+  local _, _, process_loss = process_basis_summary(
+    materials_cost,
+    (gold_fee or 0) + time_cost,
+    committed_qty,
+    commodity_count,
+    total_process_output_qty(outputs)
+  )
 
   local events = {
     {
@@ -1179,6 +1652,17 @@ function ledger.apply_process(state, process_id, inputs, outputs, gold_fee, game
         elapsed_seconds = elapsed_seconds,
         rate_gold_per_hour = rate_gold_per_hour,
         reason = "auto_elapsed_time",
+        game_time = game_time
+      }
+    })
+  end
+
+  if process_loss > 0.0001 then
+    table.insert(events, {
+      event_type = "PROCESS_WRITE_OFF",
+      payload = {
+        process_instance_id = process_instance_id,
+        amount_gold = process_loss,
         game_time = game_time
       }
     })
@@ -2293,7 +2777,6 @@ function ledger.apply_process_complete(state, process_instance_id, outputs, note
   local time_cost = build_process_time_cost(state, instance, completed_at)
   local time_cost_gold = time_cost and (time_cost.amount_gold or 0) or 0
 
-  local committed_basis = (instance.committed_cost_total or 0) + (instance.fees_total or 0) + time_cost_gold
   local committed_qty = 0
   local commodity_count = 0
   do
@@ -2307,24 +2790,13 @@ function ledger.apply_process_complete(state, process_instance_id, outputs, note
     end
   end
 
-  local output_basis = 0
-  if total_output_qty > 0 and committed_basis > 0 then
-    local material_basis = instance.committed_cost_total or 0
-    local fee_basis = (instance.fees_total or 0) + time_cost_gold
-    if commodity_count == 0 or committed_qty <= 0 then
-      output_basis = material_basis + fee_basis
-    elseif commodity_count > 1 then
-      output_basis = material_basis + fee_basis
-    elseif committed_qty > 0 then
-      local ratio = total_output_qty / committed_qty
-      if ratio > 1 then
-        ratio = 1
-      end
-      output_basis = (material_basis * ratio) + fee_basis
-    end
-  end
-
-  local process_loss = committed_basis - output_basis
+  local _, _, process_loss = process_basis_summary(
+    instance.committed_cost_total or 0,
+    (instance.fees_total or 0) + time_cost_gold,
+    committed_qty,
+    commodity_count,
+    total_output_qty
+  )
   local events = {}
 
   if time_cost and time_cost.amount_gold > 0 then
@@ -2473,7 +2945,6 @@ local function sum_committed_inputs(instance)
       local time_cost = build_process_time_cost(state, instance, completed_at)
       local time_cost_gold = time_cost and (time_cost.amount_gold or 0) or 0
 
-      local committed_basis = (instance.committed_cost_total or 0) + (instance.fees_total or 0) + time_cost_gold
       local committed_qty = 0
       local commodity_count = 0
       do
@@ -2487,24 +2958,13 @@ local function sum_committed_inputs(instance)
         end
       end
 
-      local output_basis = 0
-      if total_output_qty > 0 and committed_basis > 0 then
-        local material_basis = instance.committed_cost_total or 0
-        local fee_basis = (instance.fees_total or 0) + time_cost_gold
-        if commodity_count == 0 or committed_qty <= 0 then
-          output_basis = material_basis + fee_basis
-        elseif commodity_count > 1 then
-          output_basis = material_basis + fee_basis
-        elseif committed_qty > 0 then
-          local ratio = total_output_qty / committed_qty
-          if ratio > 1 then
-            ratio = 1
-          end
-          output_basis = (material_basis * ratio) + fee_basis
-        end
-      end
-
-      local process_loss = committed_basis - output_basis
+      local _, _, process_loss = process_basis_summary(
+        instance.committed_cost_total or 0,
+        (instance.fees_total or 0) + time_cost_gold,
+        committed_qty,
+        commodity_count,
+        total_output_qty
+      )
 
       local events = {}
       if time_cost and time_cost.amount_gold > 0 then

@@ -224,6 +224,22 @@ process_instances(
   note TEXT
 )
 
+cash_accounts(
+  currency TEXT PRIMARY KEY,
+  balance INTEGER NOT NULL
+)
+
+cash_movements(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  currency TEXT NOT NULL,
+  amount INTEGER NOT NULL,
+  reason TEXT,
+  note TEXT,
+  source_event_id INTEGER
+)
+
 ------------------------------------------------------------
 LEGACY TABLES / COLUMNS (MAY EXIST IN OLDER DBS)
 ------------------------------------------------------------
@@ -325,6 +341,11 @@ Orders:
 - ORDER_ADD_SALE
 - ORDER_SETTLE
 - ORDER_CLOSE (optional)
+
+Cash:
+- CASH_INIT
+- CASH_ADJUST
+- CURRENCY_CONVERT
 
 ------------------------------------------------------------
 EVENT PAYLOAD SPECIFICATIONS (MUST SUPPORT)
@@ -600,6 +621,30 @@ ORDER_CLOSE supports:
   status?
 }
 
+CASH_INIT supports:
+{
+  currency,
+  amount,
+  note?
+}
+
+CASH_ADJUST supports:
+{
+  currency,
+  amount,
+  reason?,
+  note?
+}
+
+CURRENCY_CONVERT supports:
+{
+  from_currency,
+  from_amount,
+  to_currency,
+  to_amount,
+  note?
+}
+
 ------------------------------------------------------------
 BACKWARD COMPATIBILITY (LEDGER + PROJECTOR)
 ------------------------------------------------------------
@@ -633,6 +678,11 @@ PROJECTOR (APPLY EVENTS TO PROJECTIONS)
 PROCESS_WRITE_OFF:
 - Must be persisted for reporting.
 - Must not modify inventory.
+
+Cash projections:
+- Cash balances are materialized projections derived from ledger events.
+- Cash accounts MUST remain separate from commodity inventory projections.
+- Rebuild must reproduce cash balances and cash movement history deterministically.
 
 ------------------------------------------------------------
 COMMANDS (MVP TOPICS)

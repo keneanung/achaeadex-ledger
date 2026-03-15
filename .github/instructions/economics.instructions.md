@@ -27,6 +27,10 @@ Process Revenue:
   Gold emitted by a process as output.
   Process revenue is revenue only and never inventory.
 
+Cash Account:
+  A tracked currency balance (gold, credits, lessons, mayancrowns, etc.).
+  Cash accounts are liquidity/assets, not inventory, and never participate in WAC.
+
 Design Capital:
   Accumulated gold spent on design creation (submission, resubmission, finalize).
 
@@ -70,6 +74,17 @@ INVENTORY VALUATION
 2) Inventory costing method MUST be Weighted Average Cost (WAC).
 3) Adjustments are FUTURE-ONLY (no restatement of historical reports by default).
 FIFO, LIFO, or other methods are not allowed.
+
+------------------------------------------------------------
+CASH / CURRENCIES
+------------------------------------------------------------
+
+1) Currencies MUST be modeled as cash accounts, never as commodities.
+2) Cash accounts MUST NOT participate in WAC inventory valuation.
+3) Opening balances use `CASH_INIT` and represent opening capital / opening balance, not revenue.
+4) Manual reconciliations use `CASH_ADJUST` and do not create profit by default.
+5) Currency conversion uses `CURRENCY_CONVERT` and must not create profit or loss by itself.
+6) The implementation MUST remain generic for arbitrary currency identifiers.
 
 ------------------------------------------------------------
 PRODUCTION SOURCES

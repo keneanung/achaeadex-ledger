@@ -119,20 +119,39 @@ local function process_revenue_summary(state, year)
   local summary = {
     revenue = 0,
     total_cost = 0,
+    write_off_total = 0,
+    carried_basis = 0,
+    profit_contribution = 0,
     net_result = 0,
     count = 0,
     has_revenue = false
   }
 
-  for _, instance in pairs(state.process_instances or {}) do
+  for process_instance_id, instance in pairs(state.process_instances or {}) do
     local revenue = round_gold(instance.revenue_gold or 0)
     if revenue > 0 then
       local resolved_year = instance.revenue_resolved_game_year and tonumber(instance.revenue_resolved_game_year) or nil
       if not year or resolved_year == tonumber(year) then
         local total_cost = round_gold((instance.committed_cost_total or 0) + (instance.fees_total or 0))
+        local write_off_total = 0
+        for _, row in ipairs(state.process_write_offs or {}) do
+          if row.process_instance_id == (instance.process_instance_id or process_instance_id) then
+            local row_year = row.resolved_game_year and tonumber(row.resolved_game_year) or nil
+            if not year or row_year == tonumber(year) then
+              write_off_total = write_off_total + round_gold(row.amount_gold or 0)
+            end
+          end
+        end
+        local carried_basis = total_cost - write_off_total
+        if carried_basis < 0 then
+          carried_basis = 0
+        end
         summary.revenue = summary.revenue + revenue
         summary.total_cost = summary.total_cost + total_cost
-        summary.net_result = summary.net_result + (revenue - total_cost)
+        summary.write_off_total = summary.write_off_total + write_off_total
+        summary.carried_basis = summary.carried_basis + carried_basis
+        summary.profit_contribution = summary.profit_contribution + (revenue - write_off_total)
+        summary.net_result = summary.net_result + (revenue - write_off_total)
         summary.count = summary.count + 1
         summary.has_revenue = true
       end
@@ -246,6 +265,20 @@ local function external_items_holdings(state)
     end
   end
   return total, count, has_mtm, has_unknown
+end
+
+local function collect_cash_balances(state)
+  local rows = {}
+  for currency, balance in pairs(state.cash_accounts or {}) do
+    table.insert(rows, {
+      currency = currency,
+      balance = round_gold(balance)
+    })
+  end
+  table.sort(rows, function(a, b)
+    return tostring(a.currency) < tostring(b.currency)
+  end)
+  return rows
 end
 
 local function build_base_warnings(state, opts)
@@ -472,12 +505,18 @@ function reports.overall(state, opts)
   totals.process_losses_unattributed = round_gold(process_loss_summary.unattributed_total)
   totals.process_revenue = process_revenue.has_revenue and round_gold(process_revenue.revenue) or nil
   totals.process_total_cost = process_revenue.has_revenue and round_gold(process_revenue.total_cost) or nil
+  totals.process_basis_carried = process_revenue.has_revenue and round_gold(process_revenue.carried_basis) or nil
   totals.process_net_result = process_revenue.has_revenue and round_gold(process_revenue.net_result) or nil
-  totals.true_profit = round_gold(totals.true_profit) - process_losses
+  totals.process_profit_contribution = (process_revenue.has_revenue or process_losses > 0)
+    and round_gold(process_revenue.net_result or 0)
+    or nil
+  totals.true_profit = round_gold(totals.true_profit)
+    + (totals.process_net_result or 0)
 
   return {
     totals = totals,
     sales = sales,
+    cash_balances = collect_cash_balances(state),
     design_remaining = design_remaining,
     pattern_remaining = pattern_remaining,
     holdings = {
@@ -566,8 +605,13 @@ function reports.year(state, year, opts)
   totals.process_losses = year_process_losses
   totals.process_revenue = process_revenue.has_revenue and round_gold(process_revenue.revenue) or nil
   totals.process_total_cost = process_revenue.has_revenue and round_gold(process_revenue.total_cost) or nil
+  totals.process_basis_carried = process_revenue.has_revenue and round_gold(process_revenue.carried_basis) or nil
   totals.process_net_result = process_revenue.has_revenue and round_gold(process_revenue.net_result) or nil
-  totals.true_profit = round_gold(totals.true_profit) - year_process_losses
+  totals.process_profit_contribution = (process_revenue.has_revenue or year_process_losses > 0)
+    and round_gold(process_revenue.net_result or 0)
+    or nil
+  totals.true_profit = round_gold(totals.true_profit)
+    + (totals.process_net_result or 0)
 
   local note = nil
   if process_loss_summary.unattributed_count > 0 then
@@ -581,6 +625,7 @@ function reports.year(state, year, opts)
     year = year,
     totals = totals,
     sales = sales,
+    cash_balances = collect_cash_balances(state),
     note = note,
     unattributed_process_write_off_count = process_loss_summary.unattributed_count,
     broker_activity_count = #broker_sales,
@@ -761,25 +806,48 @@ function reports.process(state, process_instance_id)
   local lost_inputs = {}
   local write_off_total = 0
 
+  for _, entry in ipairs(instance.committed_entries or {}) do
+    committed_inputs[entry.commodity] = (committed_inputs[entry.commodity] or 0) + (entry.qty or 0)
+  end
+
+  merge_qty_map(outputs, instance.outputs)
+  if instance.disposition then
+    merge_qty_map(returned_inputs, instance.disposition.returned)
+    merge_qty_map(lost_inputs, instance.disposition.lost)
+    if next(outputs) == nil then
+      merge_qty_map(outputs, instance.disposition.outputs)
+    end
+  end
+
+  for _, row in ipairs(state.process_write_offs or {}) do
+    if row.process_instance_id == process_instance_id then
+      write_off_total = write_off_total + round_gold(row.amount_gold or 0)
+    end
+  end
+
   for _, event in ipairs(get_events(state)) do
     local payload = event.payload or {}
     if payload.process_instance_id == process_instance_id then
       if event.event_type == "PROCESS_START" or event.event_type == "PROCESS_APPLY" then
-        merge_qty_map(committed_inputs, payload.inputs)
-        if event.event_type == "PROCESS_APPLY" then
+        if next(committed_inputs) == nil then
+          merge_qty_map(committed_inputs, payload.inputs)
+        end
+        if event.event_type == "PROCESS_APPLY" and next(outputs) == nil then
           merge_qty_map(outputs, payload.outputs)
         end
       elseif event.event_type == "PROCESS_ADD_INPUTS" then
-        merge_qty_map(committed_inputs, payload.inputs)
-      elseif event.event_type == "PROCESS_COMPLETE" then
+        if next(committed_inputs) == nil then
+          merge_qty_map(committed_inputs, payload.inputs)
+        end
+      elseif event.event_type == "PROCESS_COMPLETE" and next(outputs) == nil then
         merge_qty_map(outputs, payload.outputs)
-      elseif event.event_type == "PROCESS_ABORT" then
+      elseif event.event_type == "PROCESS_ABORT" and next(returned_inputs) == nil and next(lost_inputs) == nil then
         local disposition = payload.disposition or {}
         merge_qty_map(returned_inputs, disposition.returned)
         merge_qty_map(lost_inputs, disposition.lost)
-        merge_qty_map(outputs, disposition.outputs)
-      elseif event.event_type == "PROCESS_WRITE_OFF" then
-        write_off_total = write_off_total + round_gold(payload.amount_gold)
+        if next(outputs) == nil then
+          merge_qty_map(outputs, disposition.outputs)
+        end
       end
     end
   end
@@ -804,7 +872,8 @@ function reports.process(state, process_instance_id)
     rate_gold_per_hour = tonumber(instance.rate_gold_per_hour) or 0,
     fees_gold = round_gold(instance.fees_total or 0),
     total_process_cost_gold = round_gold((instance.committed_cost_total or 0) + (instance.fees_total or 0)),
-    net_result_gold = round_gold(instance.revenue_gold or 0) - round_gold((instance.committed_cost_total or 0) + (instance.fees_total or 0)),
+    capitalized_basis_gold = round_gold(math.max(0, ((instance.committed_cost_total or 0) + (instance.fees_total or 0)) - write_off_total)),
+    net_result_gold = round_gold(instance.revenue_gold or 0) - round_gold(write_off_total),
     total_committed_gold = round_gold((instance.committed_cost_total or 0) + (instance.fees_total or 0)),
     output_unit_cost_gold = round_gold(instance.output_unit_cost or 0),
     write_off_total_gold = round_gold(write_off_total)

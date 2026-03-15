@@ -261,6 +261,46 @@ describe("Schema Migration", function()
     end)
   end)
 
+  describe("migration v15", function()
+    it("should create cash account projection tables", function()
+      local db = lsqlite3.open_memory()
+      schema.migrate(db, 15)
+
+      local tables = {
+        "cash_accounts",
+        "cash_movements"
+      }
+
+      for _, table_name in ipairs(tables) do
+        local stmt = db:prepare([[
+          SELECT name FROM sqlite_master
+          WHERE type='table' AND name=?
+        ]])
+        stmt:bind_values(table_name)
+        local has_table = false
+        for _ in stmt:nrows() do
+          has_table = true
+          break
+        end
+        stmt:finalize()
+
+        assert.is_true(has_table, "Table " .. table_name .. " should exist")
+      end
+
+      local columns = {}
+      local stmt = db:prepare("PRAGMA table_info(cash_accounts)")
+      for row in stmt:nrows() do
+        columns[row.name] = true
+      end
+      stmt:finalize()
+
+      assert.is_true(columns.currency, "cash_accounts.currency should exist")
+      assert.is_true(columns.balance, "cash_accounts.balance should exist")
+
+      db:close()
+    end)
+  end)
+
   describe("migration v6", function()
     it("should add process write-off table", function()
       local db = lsqlite3.open_memory()
@@ -553,8 +593,8 @@ describe("Schema Migration", function()
       
       local version = schema.migrate(db)
       
-      -- Should migrate to the latest version (currently 14)
-      assert.are.equal(14, version)
+      -- Should migrate to the latest version (currently 15)
+      assert.are.equal(15, version)
       
       db:close()
     end)

@@ -389,6 +389,28 @@ schema.migrations = {
 
     CREATE INDEX IF NOT EXISTS idx_process_time_costs_process ON process_time_costs(process_instance_id);
     CREATE INDEX IF NOT EXISTS idx_process_time_costs_source_event_id ON process_time_costs(source_event_id);
+  ]],
+  [15] = [[
+    CREATE TABLE IF NOT EXISTS cash_accounts (
+      currency TEXT PRIMARY KEY,
+      balance INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS cash_movements (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      currency TEXT NOT NULL,
+      amount INTEGER NOT NULL,
+      reason TEXT,
+      note TEXT,
+      source_event_id INTEGER
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_cash_movements_currency ON cash_movements(currency);
+    CREATE INDEX IF NOT EXISTS idx_cash_movements_ts ON cash_movements(ts);
+    CREATE INDEX IF NOT EXISTS idx_cash_movements_event_type ON cash_movements(event_type);
+    CREATE INDEX IF NOT EXISTS idx_cash_movements_source_event_id ON cash_movements(source_event_id);
   ]]
 }
 
