@@ -115,6 +115,60 @@ local function process_write_off_summary(state, year)
   return summary
 end
 
+local function process_capitalized_basis(instance)
+  if not instance then
+    return 0
+  end
+
+  if instance.capitalized_basis_total ~= nil then
+    return round_gold(instance.capitalized_basis_total)
+  end
+
+  local total = 0
+  for _, row in pairs(instance.output_allocations or {}) do
+    total = total + (tonumber(row.total_cost) or 0)
+  end
+  return round_gold(total)
+end
+
+local function process_financial_totals(instance, write_off_total)
+  local revenue_gold = round_gold(instance and instance.revenue_gold or 0)
+  local committed_cost_gold = round_gold(instance and instance.committed_cost_total or 0)
+  local direct_fee_gold = round_gold(instance and instance.direct_fee_total or 0)
+  local time_cost_gold = round_gold(instance and instance.time_cost_total or 0)
+  local total_process_cost_gold = committed_cost_gold + direct_fee_gold + time_cost_gold
+  local capitalized_basis_gold = process_capitalized_basis(instance)
+  local offsettable_cost_gold = instance and instance.offsettable_cost_total ~= nil
+    and round_gold(instance.offsettable_cost_total)
+    or (committed_cost_gold + direct_fee_gold)
+  local revenue_offset_applied_gold = instance and instance.revenue_offset_applied_gold ~= nil
+    and round_gold(instance.revenue_offset_applied_gold)
+    or math.min(revenue_gold, offsettable_cost_gold)
+  local net_offsettable_cost_gold = instance and instance.net_offsettable_cost_total ~= nil
+    and round_gold(instance.net_offsettable_cost_total)
+    or math.max(offsettable_cost_gold - revenue_offset_applied_gold, 0)
+  local realized_surplus_gold = instance and instance.realized_surplus_gold ~= nil
+    and round_gold(instance.realized_surplus_gold)
+    or math.max(revenue_gold - offsettable_cost_gold, 0)
+  local realized_cost_gold = total_process_cost_gold - capitalized_basis_gold
+
+  return {
+    revenue_gold = revenue_gold,
+    committed_cost_gold = committed_cost_gold,
+    direct_fee_gold = direct_fee_gold,
+    time_cost_gold = time_cost_gold,
+    total_process_cost_gold = total_process_cost_gold,
+    capitalized_basis_gold = capitalized_basis_gold,
+    offsettable_cost_gold = offsettable_cost_gold,
+    revenue_offset_applied_gold = revenue_offset_applied_gold,
+    net_offsettable_cost_gold = net_offsettable_cost_gold,
+    realized_surplus_gold = realized_surplus_gold,
+    realized_cost_gold = realized_cost_gold,
+    net_result_gold = revenue_gold - realized_cost_gold,
+    write_off_total_gold = round_gold(write_off_total or 0)
+  }
+end
+
 local function process_revenue_summary(state, year)
   local summary = {
     revenue = 0,
@@ -132,7 +186,6 @@ local function process_revenue_summary(state, year)
     if revenue > 0 then
       local resolved_year = instance.revenue_resolved_game_year and tonumber(instance.revenue_resolved_game_year) or nil
       if not year or resolved_year == tonumber(year) then
-        local total_cost = round_gold((instance.committed_cost_total or 0) + (instance.fees_total or 0))
         local write_off_total = 0
         for _, row in ipairs(state.process_write_offs or {}) do
           if row.process_instance_id == (instance.process_instance_id or process_instance_id) then
@@ -142,16 +195,14 @@ local function process_revenue_summary(state, year)
             end
           end
         end
-        local carried_basis = total_cost - write_off_total
-        if carried_basis < 0 then
-          carried_basis = 0
-        end
-        summary.revenue = summary.revenue + revenue
-        summary.total_cost = summary.total_cost + total_cost
-        summary.write_off_total = summary.write_off_total + write_off_total
-        summary.carried_basis = summary.carried_basis + carried_basis
-        summary.profit_contribution = summary.profit_contribution + (revenue - write_off_total)
-        summary.net_result = summary.net_result + (revenue - write_off_total)
+
+        local financials = process_financial_totals(instance, write_off_total)
+        summary.revenue = summary.revenue + financials.revenue_gold
+        summary.total_cost = summary.total_cost + financials.total_process_cost_gold
+        summary.write_off_total = summary.write_off_total + financials.write_off_total_gold
+        summary.carried_basis = summary.carried_basis + financials.capitalized_basis_gold
+        summary.profit_contribution = summary.profit_contribution + financials.net_result_gold
+        summary.net_result = summary.net_result + financials.net_result_gold
         summary.count = summary.count + 1
         summary.has_revenue = true
       end
@@ -308,7 +359,8 @@ local function sale_breakdown(state, sale)
 
   local source = get_source_for_item(state, item)
   local sale_price = round_gold(sale.sale_price_gold)
-  local operational_cost = round_gold(item and item.operational_cost_gold or (external.basis_gold or 0))
+  local external_basis = external and external.basis_gold or 0
+  local operational_cost = round_gold(item and item.operational_cost_gold or external_basis)
   local operational_profit = sale_price - operational_cost
   local true_profit = round_gold(sale.true_profit or operational_profit)
 
@@ -825,6 +877,8 @@ function reports.process(state, process_instance_id)
     end
   end
 
+  local financials = process_financial_totals(instance, write_off_total)
+
   for _, event in ipairs(get_events(state)) do
     local payload = event.payload or {}
     if payload.process_instance_id == process_instance_id then
@@ -864,19 +918,23 @@ function reports.process(state, process_instance_id)
     outputs = outputs,
     returned_inputs = returned_inputs,
     lost_inputs = lost_inputs,
-    revenue_gold = round_gold(instance.revenue_gold or 0),
-    committed_cost_gold = round_gold(instance.committed_cost_total or 0),
-    direct_fee_gold = round_gold(instance.direct_fee_total or 0),
-    time_cost_gold = round_gold(instance.time_cost_total or 0),
+    revenue_gold = financials.revenue_gold,
+    committed_cost_gold = financials.committed_cost_gold,
+    direct_fee_gold = financials.direct_fee_gold,
+    time_cost_gold = financials.time_cost_gold,
     elapsed_seconds = tonumber(instance.elapsed_seconds) or 0,
     rate_gold_per_hour = tonumber(instance.rate_gold_per_hour) or 0,
     fees_gold = round_gold(instance.fees_total or 0),
-    total_process_cost_gold = round_gold((instance.committed_cost_total or 0) + (instance.fees_total or 0)),
-    capitalized_basis_gold = round_gold(math.max(0, ((instance.committed_cost_total or 0) + (instance.fees_total or 0)) - write_off_total)),
-    net_result_gold = round_gold(instance.revenue_gold or 0) - round_gold(write_off_total),
-    total_committed_gold = round_gold((instance.committed_cost_total or 0) + (instance.fees_total or 0)),
+    offsettable_cost_gold = financials.offsettable_cost_gold,
+    revenue_offset_applied_gold = financials.revenue_offset_applied_gold,
+    net_offsettable_cost_gold = financials.net_offsettable_cost_gold,
+    total_process_cost_gold = financials.total_process_cost_gold,
+    capitalized_basis_gold = financials.capitalized_basis_gold,
+    realized_surplus_gold = financials.realized_surplus_gold,
+    net_result_gold = financials.net_result_gold,
+    total_committed_gold = financials.total_process_cost_gold,
     output_unit_cost_gold = round_gold(instance.output_unit_cost or 0),
-    write_off_total_gold = round_gold(write_off_total)
+    write_off_total_gold = financials.write_off_total_gold
   }
 end
 

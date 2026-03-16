@@ -226,6 +226,8 @@ describe("Ledger Core", function()
       local state = ledger.new(store)
       
       ledger.apply_opening_inventory(state, "wood", 10, 5)
+      ledger.apply_commodity_set_standard_value(state, "plank", 1)
+      ledger.apply_commodity_set_standard_value(state, "sawdust", 1)
       
       -- Process producing multiple outputs
       ledger.apply_process(state, "saw",

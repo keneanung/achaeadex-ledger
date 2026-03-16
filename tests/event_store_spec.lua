@@ -475,6 +475,9 @@ describe("EventStore", function()
     ledger.apply_process_time_cost_rate(state1, 4781)
     ledger.apply_process_time_cost_cutover(state1, "2026-03-01T00:00:00Z")
     ledger.apply_opening_inventory(state1, "potash", 31, 1546 / 31)
+    ledger.apply_commodity_set_standard_value(state1, "malachite", 1)
+    ledger.apply_commodity_set_standard_value(state1, "realgar", 1)
+    ledger.apply_commodity_set_standard_value(state1, "skins", 1)
     ledger.apply_process(state1, "hunting", { potash = 31 }, { malachite = 939, realgar = 61, skins = 54 }, 0, nil, {
       revenue_gold = 2790,
       time_hours = 1,
@@ -499,9 +502,9 @@ describe("EventStore", function()
     local overall2 = reports.overall(state2)
 
     assert.are.equal(6327, report2.total_process_cost_gold)
-    assert.are.equal(6327, report2.capitalized_basis_gold)
-    assert.are.equal(2790, report2.net_result_gold)
-    assert.are.equal(2790, overall2.totals.process_net_result)
-    assert.are.equal(6327, overall2.totals.process_basis_carried)
+    assert.are.equal(4781, report2.capitalized_basis_gold)
+    assert.are.equal(1244, report2.net_result_gold)
+    assert.are.equal(1244, overall2.totals.process_net_result)
+    assert.are.equal(4781, overall2.totals.process_basis_carried)
   end)
 end)

@@ -686,8 +686,18 @@ local help_topics = {
   },
   price = {
     title = "Price",
-    purpose = "Suggest advisory prices from craft or commodity cost basis. Commodity pricing uses current WAC, supports stack quantities, and treats totals as primary while unit prices are informational.",
+    purpose = "Suggest advisory prices from craft or commodity cost basis. Commodity pricing keeps WAC as the accounting floor and can also incorporate observed broker-market averages.",
     commands = {
+      {
+        usage = "adex price standard <commodity> <standard_value>",
+        example = "adex price standard skins 100",
+        notes = "Sets the standard value used only for multi-output process allocation. This does not change WAC inventory cost."
+      },
+      {
+        usage = "adex price inspect <commodity>",
+        example = "adex price inspect skins",
+        notes = "Shows standard value, observed market average, and observation count for the commodity."
+      },
       {
         usage = "adex price commodity <commodity> [--qty <n>] [--tier low|mid|high|all] [--round <gold>] [--extra <gold>]",
         example = "adex price commodity leather",
@@ -696,7 +706,7 @@ local help_topics = {
           "adex price commodity silver --qty 10 --tier mid",
           "adex price commodity wood --qty 100 --extra 500"
         },
-        notes = "Uses current WAC for the commodity. Supports arbitrary quantities. Suggested totals are the primary output; unit suggestions are informational only."
+        notes = "Uses current WAC as the accounting floor. If broker buy/sell observations exist, market-adjusted suggestions are also considered and the higher result per tier is returned."
       },
       {
         usage = "adex price quote <source_id_or_alias> [--qty <n>] [--tier low|mid|high|all] [--round <gold>] [--time <hours>] [--extra <gold>] [--materials k=v,...]",
@@ -3257,12 +3267,15 @@ function commands.handle(input)
       { label = "Committed input cost", value = fmt(report.committed_cost_gold) },
       { label = "Direct fees", value = fmt(report.direct_fee_gold) },
       { label = "Time cost", value = fmt(report.time_cost_gold) },
-      { label = "Add-on cost basis", value = fmt(report.fees_gold) },
+      { label = "Offsettable cost", value = fmt(report.offsettable_cost_gold or 0) },
+      { label = "Revenue offset applied", value = fmt(report.revenue_offset_applied_gold or 0) },
+      { label = "Net offsettable cost", value = fmt(report.net_offsettable_cost_gold or 0) },
       { label = "Total process cost", value = fmt(report.total_process_cost_gold or 0) },
-      { label = "Net result", value = fmt(report.net_result_gold or 0) },
+      { label = "Capitalized basis", value = fmt(report.capitalized_basis_gold or 0) },
+      { label = "Realized surplus", value = fmt(report.realized_surplus_gold or 0) },
+      { label = "Net realized result", value = fmt(report.net_result_gold or 0) },
       { label = "Total committed", value = fmt(report.total_committed_gold) },
       { label = "Write-offs", value = fmt(report.write_off_total_gold) },
-      { label = "Capitalized basis", value = fmt(report.capitalized_basis_gold or 0) },
       { label = "Note", value = report.note or "" }
     })
 
@@ -3435,6 +3448,57 @@ function commands.handle(input)
     }, {
       { key = "tier", label = "Tier", nowrap = true, min = 4 },
       { key = "price", label = "Suggested", align = "right", min = 9 }
+    })
+    return
+  end
+
+  if cmd == "price" and tokens[2] == "standard" then
+    local commodity = tokens[3]
+    local standard_value = tokens[4] and tonumber(tokens[4]) or nil
+
+    if not commodity or standard_value == nil or standard_value < 0 then
+      error_out("usage: adex price standard <commodity> <standard_value>")
+      return
+    end
+
+    local ok, err = pcall(function()
+      ledger.apply_commodity_set_standard_value(state, commodity, standard_value)
+    end)
+    if not ok then
+      error_out(err)
+      return
+    end
+
+    render.section("Commodity Standard Value")
+    render.kv_block({
+      { label = "Commodity", value = commodity },
+      { label = "Standard value", value = tostring(standard_value) }
+    })
+    return
+  end
+
+  if cmd == "price" and tokens[2] == "inspect" then
+    local commodity = tokens[3]
+    if not commodity then
+      error_out("usage: adex price inspect <commodity>")
+      return
+    end
+
+    local ok, pricing_data = pcall(function()
+      return pricing.inspect_commodity(state, commodity)
+    end)
+    if not ok then
+      error_out(pricing_data)
+      return
+    end
+
+    local fmt = render.format_gold or tostring
+    render.section("Commodity Pricing Data")
+    render.kv_block({
+      { label = "Commodity", value = pricing_data.commodity },
+      { label = "Standard value", value = pricing_data.standard_value ~= nil and fmt(pricing_data.standard_value) or "-" },
+      { label = "Observed market avg", value = pricing_data.observed_market_avg ~= nil and fmt(pricing_data.observed_market_avg) or "-" },
+      { label = "Observed market count", value = tostring(pricing_data.observed_market_count or 0) }
     })
     return
   end

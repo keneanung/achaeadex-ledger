@@ -60,34 +60,6 @@ local function committed_stats(instance)
   return total_qty, commodity_count
 end
 
-local function compute_output_basis(material_cost, fees_total, committed_qty, output_qty, commodity_count)
-  if output_qty <= 0 then
-    return 0
-  end
-
-  material_cost = material_cost or 0
-  fees_total = fees_total or 0
-
-  if material_cost <= 0 then
-    return fees_total
-  end
-
-  if commodity_count == 0 or committed_qty <= 0 then
-    return material_cost + fees_total
-  end
-
-  if commodity_count > 1 then
-    return material_cost + fees_total
-  end
-
-  local ratio = output_qty / committed_qty
-  if ratio > 1 then
-    ratio = 1
-  end
-
-  return (material_cost * ratio) + fees_total
-end
-
 local function total_output_qty(outputs)
   local total = 0
   for _, qty in pairs(outputs or {}) do
@@ -237,7 +209,7 @@ function deferred.add_time_cost(state, process_instance_id, amount_gold, elapsed
   return instance
 end
 
-function deferred.complete(state, process_instance_id, outputs, note, completed_at)
+function deferred.complete(state, process_instance_id, outputs, note, completed_at, revenue_gold)
   ensure_state(state)
 
   local instance = state.process_instances[process_instance_id]
@@ -249,35 +221,45 @@ function deferred.complete(state, process_instance_id, outputs, note, completed_
   end
 
   outputs = outputs or {}
-  local output_qty = total_output_qty(outputs)
-
   local material_cost = instance.committed_cost_total
-  local fees_total = instance.fees_total
   local committed_qty, commodity_count = committed_stats(instance)
-  local output_basis = compute_output_basis(material_cost, fees_total, committed_qty, output_qty, commodity_count)
-  local output_unit_cost = 0
-  if output_qty > 0 then
-    output_unit_cost = output_basis / output_qty
-  end
+  local costing = get_costing()
+  local allocation = costing.allocate_process_outputs({
+    material_input_cost = material_cost,
+    direct_fee_gold = instance.direct_fee_total or 0,
+    time_cost_gold = instance.time_cost_total or 0,
+    revenue_gold = revenue_gold or 0,
+    committed_qty = committed_qty,
+    commodity_count = commodity_count,
+    outputs = outputs,
+    get_standard_value = function(commodity)
+      return get_inventory().get_standard_value(state.inventory, commodity)
+    end
+  })
 
   local inventory = get_inventory()
-  for commodity, qty in pairs(outputs) do
-    inventory.add(state.inventory, commodity, qty, output_unit_cost)
+  for commodity, row in pairs(allocation.output_allocations or {}) do
+    inventory.add(state.inventory, commodity, row.qty, row.unit_cost)
   end
 
   instance.status = "completed"
   instance.completed_at = completed_at or os.date("!%Y-%m-%dT%H:%M:%SZ")
   instance.note = note or instance.note
   instance.outputs = outputs
-  instance.output_unit_cost = output_unit_cost
+  instance.output_unit_cost = allocation.output_unit_cost
+  instance.output_allocations = allocation.output_allocations
+  instance.offsettable_cost_total = allocation.offsettable_cost
+  instance.net_offsettable_cost_total = allocation.net_offsettable_cost
+  instance.revenue_offset_applied_gold = allocation.revenue_offset_applied
+  instance.capitalized_basis_total = allocation.output_basis_total
+  instance.realized_surplus_gold = allocation.realized_surplus_gold
 
-  local costing = get_costing()
   instance.elapsed_seconds = costing.elapsed_seconds(instance.started_at, instance.completed_at) or instance.elapsed_seconds or 0
 
   return instance
 end
 
-function deferred.abort(state, process_instance_id, disposition, note, completed_at)
+function deferred.abort(state, process_instance_id, disposition, note, completed_at, revenue_gold)
   ensure_state(state)
 
   local instance = state.process_instances[process_instance_id]
@@ -294,7 +276,6 @@ function deferred.abort(state, process_instance_id, disposition, note, completed
   local outputs = disposition.outputs or {}
 
   local material_cost = instance.committed_cost_total
-  local fees_total = instance.fees_total
   local committed_qty, commodity_count = committed_stats(instance)
 
   local inventory = get_inventory()
@@ -311,16 +292,22 @@ function deferred.abort(state, process_instance_id, disposition, note, completed
     end)
   end
 
-  local output_qty = total_output_qty(outputs)
+  local costing = get_costing()
+  local allocation = costing.allocate_process_outputs({
+    material_input_cost = material_cost,
+    direct_fee_gold = instance.direct_fee_total or 0,
+    time_cost_gold = instance.time_cost_total or 0,
+    revenue_gold = revenue_gold or 0,
+    committed_qty = committed_qty,
+    commodity_count = commodity_count,
+    outputs = outputs,
+    get_standard_value = function(commodity)
+      return get_inventory().get_standard_value(state.inventory, commodity)
+    end
+  })
 
-  local output_basis = compute_output_basis(material_cost, fees_total, committed_qty, output_qty, commodity_count)
-  local output_unit_cost = 0
-  if output_qty > 0 then
-    output_unit_cost = output_basis / output_qty
-  end
-
-  for commodity, qty in pairs(outputs) do
-    inventory.add(state.inventory, commodity, qty, output_unit_cost)
+  for commodity, row in pairs(allocation.output_allocations or {}) do
+    inventory.add(state.inventory, commodity, row.qty, row.unit_cost)
   end
 
   instance.status = "aborted"
@@ -328,9 +315,14 @@ function deferred.abort(state, process_instance_id, disposition, note, completed
   instance.note = note or instance.note
   instance.disposition = disposition
   instance.outputs = outputs
-  instance.output_unit_cost = output_unit_cost
+  instance.output_unit_cost = allocation.output_unit_cost
+  instance.output_allocations = allocation.output_allocations
+  instance.offsettable_cost_total = allocation.offsettable_cost
+  instance.net_offsettable_cost_total = allocation.net_offsettable_cost
+  instance.revenue_offset_applied_gold = allocation.revenue_offset_applied
+  instance.capitalized_basis_total = allocation.output_basis_total
+  instance.realized_surplus_gold = allocation.realized_surplus_gold
 
-  local costing = get_costing()
   instance.elapsed_seconds = costing.elapsed_seconds(instance.started_at, instance.completed_at) or instance.elapsed_seconds or 0
 
   return instance

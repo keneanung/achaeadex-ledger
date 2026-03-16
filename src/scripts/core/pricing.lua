@@ -21,6 +21,18 @@ local function get_costing()
   return _G.AchaeadexLedger.Core.Costing
 end
 
+local function build_market_adjusted_suggestion(base_cost_gold, policy, observed_market_avg, qty, extra_gold)
+  local observed_avg = tonumber(observed_market_avg)
+  local quantity = tonumber(qty) or 1
+  local extra = tonumber(extra_gold) or 0
+  if observed_avg == nil then
+    return nil
+  end
+
+  local market_base_total = (observed_avg * quantity) + extra
+  return pricing.suggest_prices(market_base_total, policy)
+end
+
 local function round_up(value, step)
   if step <= 0 then
     return value
@@ -123,6 +135,7 @@ function pricing.suggest_commodity(state, commodity, opts)
   local inventory = get_inventory()
   local unit_wac = inventory.get_unit_cost(state.inventory, commodity)
   local qty_on_hand = inventory.get_qty(state.inventory, commodity)
+  local pricing_data = inventory.get_pricing_data(state.inventory, commodity)
 
   if qty_on_hand <= 0 or unit_wac <= 0 then
     error("commodity '" .. tostring(commodity) .. "' has no known WAC; initialize or acquire it first")
@@ -139,11 +152,24 @@ function pricing.suggest_commodity(state, commodity, opts)
   end
 
   local suggestion = pricing.suggest_prices(adjusted_base_total, policy)
+  local market_suggestion = nil
+  if (pricing_data.observed_market_count or 0) > 0 and pricing_data.observed_market_avg ~= nil then
+    market_suggestion = build_market_adjusted_suggestion(adjusted_base_total, policy, pricing_data.observed_market_avg, qty, extra_gold)
+  end
   local selected_tiers = build_selected_tiers(tier)
   local total_suggested = {
-    low = selected_tiers.low and suggestion.suggested.low or nil,
-    mid = selected_tiers.mid and suggestion.suggested.mid or nil,
-    high = selected_tiers.high and suggestion.suggested.high or nil
+    low = selected_tiers.low and math.max(
+      suggestion.suggested.low,
+      market_suggestion and market_suggestion.suggested.low or suggestion.suggested.low
+    ) or nil,
+    mid = selected_tiers.mid and math.max(
+      suggestion.suggested.mid,
+      market_suggestion and market_suggestion.suggested.mid or suggestion.suggested.mid
+    ) or nil,
+    high = selected_tiers.high and math.max(
+      suggestion.suggested.high,
+      market_suggestion and market_suggestion.suggested.high or suggestion.suggested.high
+    ) or nil
   }
   local unit_suggested = {
     low = total_suggested.low and math.ceil(total_suggested.low / qty) or nil,
@@ -160,11 +186,24 @@ function pricing.suggest_commodity(state, commodity, opts)
     extra_gold = extra_gold,
     adjusted_base_total = adjusted_base_total,
     rounded_base_total = suggestion.rounded_base_gold,
+    observed_market_avg = pricing_data.observed_market_avg,
+    observed_market_count = pricing_data.observed_market_count,
+    observed_market_qty_total = pricing_data.observed_market_qty_total,
+    standard_value = pricing_data.standard_value,
+    market_rounded_base_total = market_suggestion and market_suggestion.rounded_base_gold or nil,
     tier = tier,
     round_to_gold = policy.round_to_gold,
     suggested_total = total_suggested,
     suggested_unit = unit_suggested
   }
+end
+
+function pricing.inspect_commodity(state, commodity)
+  assert(type(state) == "table", "state must be a table")
+  assert(type(commodity) == "string", "commodity must be a string")
+
+  local inventory = get_inventory()
+  return inventory.get_pricing_data(state.inventory, commodity)
 end
 
 function pricing.resolve_source_identifier(state, source_id_or_alias)

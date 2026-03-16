@@ -396,6 +396,23 @@ local function process_basis_summary(material_basis, fee_basis, committed_qty, c
   return committed_basis, output_basis, process_loss
 end
 
+local function build_process_allocation(state, opts)
+  local costing = get_costing()
+  return costing.allocate_process_outputs({
+    material_input_cost = opts.material_input_cost,
+    direct_fee_gold = opts.direct_fee_gold,
+    time_cost_gold = opts.time_cost_gold,
+    revenue_gold = opts.revenue_gold,
+    committed_qty = opts.committed_qty,
+    commodity_count = opts.commodity_count,
+    outputs = opts.outputs,
+    get_standard_value = function(commodity)
+      local inventory = get_inventory()
+      return inventory.get_standard_value(state.inventory, commodity)
+    end
+  })
+end
+
 local function deep_copy(value, seen)
   if type(value) ~= "table" then
     return value
@@ -553,6 +570,7 @@ local EVENT_PAYLOAD_SPECS = {
   end),
   BROKER_BUY = payload_spec({ commodity = validate_string, qty = validate_non_negative_number, unit_cost = validate_non_negative_number }, { game_time = validate_game_time }),
   BROKER_SELL = payload_spec({ commodity = validate_string, qty = validate_non_negative_number, unit_price = validate_non_negative_number, cost = validate_number, revenue = validate_number, profit = validate_number }, { sale_id = validate_string, sold_at = validate_iso8601_utc, order_id = validate_string, game_time = validate_game_time }),
+  COMMODITY_SET_STANDARD_VALUE = payload_spec({ commodity = validate_string, standard_value = validate_non_negative_number }),
   PROCESS_APPLY = payload_spec({ process_id = validate_string }, { process_instance_id = validate_string, inputs = validate_qty_map, outputs = validate_qty_map, revenue_gold = validate_non_negative_number, gold_fee = validate_non_negative_number, time_cost_gold = validate_non_negative_number, elapsed_seconds = validate_non_negative_integer, rate_gold_per_hour = validate_non_negative_number, passive = validate_flag, started_at = validate_iso8601_utc, completed_at = validate_iso8601_utc, note = validate_string, cost_breakdown_json = validate_string, game_time = validate_game_time }),
   PROCESS_START = payload_spec({ process_instance_id = validate_string, process_id = validate_string }, { inputs = validate_qty_map, gold_fee = validate_non_negative_number, passive = validate_flag, note = validate_string, started_at = validate_iso8601_utc, game_time = validate_game_time }),
   PROCESS_ADD_INPUTS = payload_spec({ process_instance_id = validate_string, inputs = validate_qty_map }, { note = validate_string, game_time = validate_game_time }),
@@ -823,14 +841,18 @@ function ledger.apply_event(state, event)
 
   if event_type == "OPENING_INVENTORY" then
     local inventory = get_inventory()
-    inventory.add(state.inventory, payload.commodity, payload.qty, payload.unit_cost)
+    inventory.add(state.inventory, payload.commodity, payload.qty, payload.unit_cost, {
+      seed_standard_value = true
+    })
   elseif event_type == "BROKER_BUY" then
     local inventory = get_inventory()
     inventory.add(state.inventory, payload.commodity, payload.qty, payload.unit_cost)
+    inventory.observe_market(state.inventory, payload.commodity, payload.unit_cost, payload.qty)
     apply_cash_adjustment(state, event_type, "gold", -((payload.qty or 0) * (payload.unit_cost or 0)), event)
   elseif event_type == "BROKER_SELL" then
     local inventory = get_inventory()
     inventory.remove(state.inventory, payload.commodity, payload.qty)
+    inventory.observe_market(state.inventory, payload.commodity, payload.unit_price, payload.qty)
     apply_cash_adjustment(state, event_type, "gold", payload.revenue or 0, event)
     if payload.sale_id then
       local resolved_game_year = resolve_event_game_year(state, event, payload)
@@ -853,11 +875,14 @@ function ledger.apply_event(state, event)
         state.order_commodity_sales[payload.order_id][payload.sale_id] = true
       end
     end
+  elseif event_type == "COMMODITY_SET_STANDARD_VALUE" then
+    local inventory = get_inventory()
+    inventory.set_standard_value(state.inventory, payload.commodity, payload.standard_value)
+    return state
   elseif event_type == "PROCESS_APPLY" then
     local inventory = get_inventory()
     local inputs = payload.inputs or {}
     local outputs = payload.outputs or {}
-    local total_output_qty = total_process_output_qty(outputs)
     local gold_fee = payload.gold_fee or 0
     local time_cost_gold = payload.time_cost_gold or 0
     local revenue_gold = tonumber(payload.revenue_gold) or 0
@@ -874,20 +899,18 @@ function ledger.apply_event(state, event)
     end
 
     local committed_qty, commodity_count = process_input_stats(inputs)
-    local _, output_basis = process_basis_summary(
-      total_input_cost,
-      gold_fee + time_cost_gold,
-      committed_qty,
-      commodity_count,
-      total_output_qty
-    )
-    local output_unit_cost = 0
-    if total_output_qty > 0 then
-      output_unit_cost = output_basis / total_output_qty
-    end
+    local allocation = build_process_allocation(state, {
+      material_input_cost = total_input_cost,
+      direct_fee_gold = gold_fee,
+      time_cost_gold = time_cost_gold,
+      revenue_gold = revenue_gold,
+      committed_qty = committed_qty,
+      commodity_count = commodity_count,
+      outputs = outputs
+    })
 
-    for commodity, qty in pairs(outputs) do
-      inventory.add(state.inventory, commodity, qty, output_unit_cost)
+    for commodity, row in pairs(allocation.output_allocations or {}) do
+      inventory.add(state.inventory, commodity, row.qty, row.unit_cost)
     end
 
     apply_cash_adjustment(state, event_type, "gold", -(gold_fee or 0), event)
@@ -910,7 +933,13 @@ function ledger.apply_event(state, event)
         elapsed_seconds = 0,
         rate_gold_per_hour = 0,
         outputs = outputs,
-        output_unit_cost = output_unit_cost,
+        output_unit_cost = allocation.output_unit_cost,
+        output_allocations = allocation.output_allocations,
+        offsettable_cost_total = allocation.offsettable_cost,
+        net_offsettable_cost_total = allocation.net_offsettable_cost,
+        revenue_offset_applied_gold = allocation.revenue_offset_applied,
+        capitalized_basis_total = allocation.output_basis_total,
+        realized_surplus_gold = allocation.realized_surplus_gold,
         cost_breakdown = decode_breakdown(payload.cost_breakdown_json),
         revenue_gold = revenue_gold,
         revenue_game_time = payload.game_time,
@@ -944,7 +973,7 @@ function ledger.apply_event(state, event)
     return deferred.add_time_cost(state, payload.process_instance_id, payload.amount_gold, payload.elapsed_seconds, payload.rate_gold_per_hour, payload.note)
   elseif event_type == "PROCESS_COMPLETE" then
     local deferred = get_deferred()
-    local instance = deferred.complete(state, payload.process_instance_id, payload.outputs, payload.note, payload.completed_at)
+    local instance = deferred.complete(state, payload.process_instance_id, payload.outputs, payload.note, payload.completed_at, payload.revenue_gold)
     instance.revenue_gold = tonumber(payload.revenue_gold) or 0
     instance.revenue_game_time = payload.game_time
     instance.revenue_scope = "complete"
@@ -957,7 +986,7 @@ function ledger.apply_event(state, event)
     return instance
   elseif event_type == "PROCESS_ABORT" then
     local deferred = get_deferred()
-    local instance = deferred.abort(state, payload.process_instance_id, payload.disposition, payload.note, payload.completed_at)
+    local instance = deferred.abort(state, payload.process_instance_id, payload.disposition, payload.note, payload.completed_at, payload.revenue_gold)
     instance.revenue_gold = tonumber(payload.revenue_gold) or 0
     instance.revenue_game_time = payload.game_time
     instance.revenue_scope = "abort"
@@ -1567,6 +1596,15 @@ function ledger.apply_broker_sell(state, commodity, qty, unit_price, opts)
   return state, profit
 end
 
+function ledger.apply_commodity_set_standard_value(state, commodity, standard_value)
+  local event = ledger.record_event(state, "COMMODITY_SET_STANDARD_VALUE", {
+    commodity = commodity,
+    standard_value = standard_value
+  })
+  ledger.apply_event(state, event)
+  return state
+end
+
 -- Process immediate PROCESS_APPLY event
 function ledger.apply_process(state, process_id, inputs, outputs, gold_fee, game_time, opts)
   opts = opts or {}
@@ -1612,13 +1650,16 @@ function ledger.apply_process(state, process_id, inputs, outputs, gold_fee, game
   })
 
   local committed_qty, commodity_count = process_input_stats(inputs)
-  local _, _, process_loss = process_basis_summary(
-    materials_cost,
-    (gold_fee or 0) + time_cost,
-    committed_qty,
-    commodity_count,
-    total_process_output_qty(outputs)
-  )
+  local allocation = build_process_allocation(state, {
+    material_input_cost = materials_cost,
+    direct_fee_gold = gold_fee or 0,
+    time_cost_gold = time_cost,
+    revenue_gold = revenue_gold,
+    committed_qty = committed_qty,
+    commodity_count = commodity_count,
+    outputs = outputs
+  })
+  local process_loss = allocation.process_loss_gold or 0
 
   local events = {
     {
@@ -2790,13 +2831,16 @@ function ledger.apply_process_complete(state, process_instance_id, outputs, note
     end
   end
 
-  local _, _, process_loss = process_basis_summary(
-    instance.committed_cost_total or 0,
-    (instance.fees_total or 0) + time_cost_gold,
-    committed_qty,
-    commodity_count,
-    total_output_qty
-  )
+  local allocation = build_process_allocation(state, {
+    material_input_cost = instance.committed_cost_total or 0,
+    direct_fee_gold = instance.direct_fee_total or 0,
+    time_cost_gold = (instance.time_cost_total or 0) + time_cost_gold,
+    revenue_gold = revenue_gold,
+    committed_qty = committed_qty,
+    commodity_count = commodity_count,
+    outputs = outputs
+  })
+  local process_loss = allocation.process_loss_gold or 0
   local events = {}
 
   if time_cost and time_cost.amount_gold > 0 then
@@ -2936,11 +2980,6 @@ local function sum_committed_inputs(instance)
         end
       end
 
-      local total_output_qty = 0
-      for _, qty in pairs(outputs) do
-        total_output_qty = total_output_qty + qty
-      end
-
       local completed_at = opts.completed_at or os.date("!%Y-%m-%dT%H:%M:%SZ")
       local time_cost = build_process_time_cost(state, instance, completed_at)
       local time_cost_gold = time_cost and (time_cost.amount_gold or 0) or 0
@@ -2958,13 +2997,16 @@ local function sum_committed_inputs(instance)
         end
       end
 
-      local _, _, process_loss = process_basis_summary(
-        instance.committed_cost_total or 0,
-        (instance.fees_total or 0) + time_cost_gold,
-        committed_qty,
-        commodity_count,
-        total_output_qty
-      )
+      local allocation = build_process_allocation(state, {
+        material_input_cost = instance.committed_cost_total or 0,
+        direct_fee_gold = instance.direct_fee_total or 0,
+        time_cost_gold = (instance.time_cost_total or 0) + time_cost_gold,
+        revenue_gold = revenue_gold,
+        committed_qty = committed_qty,
+        commodity_count = commodity_count,
+        outputs = outputs
+      })
+      local process_loss = allocation.process_loss_gold or 0
 
       local events = {}
       if time_cost and time_cost.amount_gold > 0 then
